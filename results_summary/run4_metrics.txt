@@ -1,0 +1,92 @@
+Experiment identity:
+
+run = attack_run4
+
+attack seed = 3
+
+baseline target/unlearn seed = 42
+
+model = ResNet18
+
+dataset = CIFAR10
+
+size_train = 20000
+
+forget_perc = 0.1
+
+unlearn = GradAscent
+
+attack = Apollo_Offline
+
+N = 50
+
+num_shadow = 4
+
+w = 1 4
+
+Output paths:
+
+summary file:
+save\attack_run4\ResNet18-CIFAR10\perc-0.1-class-None\summary\Apollo_Offline-GradAscent.pkl
+
+ternary file:
+save\attack_run4\ResNet18-CIFAR10\perc-0.1-class-None\ternary\Apollo_Offline-GradAscent-Unified.pkl
+
+ternary all results file:
+save\attack_run4\ResNet18-CIFAR10\perc-0.1-class-None\ternary\Apollo_Offline-GradAscent-Unified-all-results.pkl
+
+Best ternary result:
+
+best_idx = 420
+
+best_acc = 1.0
+
+best_threshold = [17.69447935, -14.22004771]
+
+best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary threshold sweep:
+
+AUC_unlearn_vs_rest = 1.0
+
+AUC_retain_vs_rest = 1.0
+
+AUC_test_vs_rest = 1.0
+
+Interpretation:
+
+run4 also reproduced the same perfect ternary result under another different attack seed
+
+the best threshold differed from run1, run2, and run3
+
+but the final classification outcome stayed identical
+
+Apollo_Offline again achieved perfect separation across all three classes
+
+Comparison with previous runs:
+
+run1 seed = 42
+
+run2 seed = 1
+
+run3 seed = 2
+
+run4 seed = 3
+
+run4 best_threshold = [17.69447935, -14.22004771]
+
+all four runs reached:
+
+best_acc = 1.0
+
+best_tpr = 1.0 for unlearn, retain, and test
+
+AUC = 1.0 for all three one-vs-rest ternary evaluations
+
+Conclusion:
+
+run4 completes a four-run attack-level reproducibility check
+
+the reduced baseline now has repeated evidence of stability across four different attack seeds
+
+the only observed variation across runs is the selected best threshold, not the final attack success

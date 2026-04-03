@@ -1,0 +1,100 @@
+Fixed baseline configuration for current phase
+
+Core setup:
+model = ResNet18
+dataset = CIFAR10
+size_train = 20000
+forget_perc = 0.1
+unlearn = GradAscent
+attack = Apollo_Offline
+N = 50
+num_shadow = 4
+w = 1 4
+baseline target/unlearn seed = 42
+
+Attack reproducibility runs completed:
+
+attack_run1: attack seed = 42
+
+attack_run2: attack seed = 1
+
+attack_run3: attack seed = 2
+
+attack_run4: attack seed = 3
+
+Current status:
+
+baseline pipeline is fixed
+
+run1 completed successfully end-to-end
+
+run2 completed successfully end-to-end
+
+run3 completed successfully end-to-end
+
+run4 completed successfully end-to-end
+
+summary and ternary outputs were generated correctly for all four runs
+
+all four runs achieved best accuracy = 1.0
+
+all four runs achieved best ternary TPR = unlearn 1.0, retain 1.0, test 1.0
+
+correct ternary-sweep empirical AUC = 1.0 for unlearn, retain, and test in all four runs
+
+Best thresholds by run:
+
+run1 = [18.59924376, -17.53391099]
+
+run2 = [17.61196089, -17.53391099]
+
+run3 = [18.1368897, -19.35539412]
+
+run4 = [17.69447935, -14.22004771]
+
+Interpretation:
+
+the reduced baseline setup is currently stable at the attack level
+
+changing the attack seed changes the selected best threshold slightly
+
+however, final attack behavior remains identical across run1 to run4
+
+Apollo_Offline consistently achieves perfect ternary separation under the current fixed reduced setup
+
+Sanity checks already verified:
+
+target unlearn / retain / test sets each contain 50 samples
+
+no overlap between target unlearn, retain, and test sample IDs
+
+shadow splits do not overlap with target train / valid / unlearn / retain splits
+
+Rule:
+Until baseline comparison phase is completed, these settings should remain unchanged.
+Only save_to or explicitly planned reproducibility settings may change.
+
+Allowed small changes:
+
+save_to = save\attack_run2 / save\attack_run3 / save\attack_run4 / ...
+
+attack seed may be changed only for planned reproducibility runs
+
+no other parameter should change during baseline-fixing phase
+
+Important note:
+The reproducibility confirmed so far is attack-level reproducibility only.
+The target model, unlearning artifacts, and shadow models still come from the same fixed baseline pipeline whose original seed is 42.
+Therefore, this should not yet be claimed as full-pipeline reproducibility.
+Full reproducibility later should regenerate pretrain + unlearn + shadow + attack under new seeds.
+
+Current conclusion:
+The baseline is fixed and currently valid for reduced-setup comparison.
+This is now stronger than a single successful run, because four attack runs under different attack seeds produced identical best accuracy, identical ternary TPRs, and identical ternary-sweep AUC values.
+However, final thesis-level claims still require either:
+
+full-pipeline multi-seed reruns, or
+
+comparison across additional unlearning methods, or
+
+both.

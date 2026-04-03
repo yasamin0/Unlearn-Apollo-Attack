@@ -1,0 +1,65 @@
+Run name: attack_run3
+Date: 2026-03-11
+Model: ResNet18
+Dataset: CIFAR10
+Train size: 20000
+Unlearning method: GradAscent
+Forget perc: 0.1
+Attack: Apollo_Offline
+N: 50
+Num shadow: 4
+w: 1 4
+Attack seed: 2
+Baseline target/unlearn seed: 42
+
+Best idx: 420
+Best accuracy: 1.0
+Best threshold: [18.1368897, -19.35539412]
+Best TPR: unlearn=1.0, retain=1.0, test=1.0
+
+Correct AUC interpretation:
+
+Naive AUC from directly using last un_conf / ov_conf values was misleading and should not be used as the final Apollo metric.
+
+Correct Apollo evaluation must be taken from the ternary threshold sweep results.
+
+Empirical one-vs-rest AUC from the ternary sweep:
+
+unlearn = 1.0
+
+retain = 1.0
+
+test = 1.0
+
+Sanity checks completed:
+
+summary file exists
+
+ternary file exists
+
+ternary all-results file exists
+
+target unlearn / retain / test groups each contain 50 samples
+
+no overlap between target unlearn, retain, and test sample IDs
+
+shadow splits do not overlap with target train / valid / unlearn / retain splits
+
+run completed end-to-end without crash
+
+Interpretation:
+Pipeline executed end-to-end successfully.
+Apollo_Offline again achieved perfect ternary separation on this reduced setup.
+For this run, the attack completely separated unlearn, retain, and test at the best operating point.
+Compared with run1 and run2, the best threshold changed again, but the final attack performance remained identical.
+
+Caution:
+This run used a new attack seed, but it still relied on the same fixed baseline target/unlearn artifacts and the same saved shadow models generated under the original setup.
+Therefore, this result confirms reproducibility at the attack level, not yet full-pipeline reproducibility across retraining, unlearning, and shadow generation.
+Additional full-seed reproducibility runs are still needed for a stronger thesis-level conclusion.
+
+Day 2 verdict:
+Successful.
+Attack-level reproducibility check passed under the current fixed setup.
+Run 3 completed end-to-end with a different attack seed.
+Apollo_Offline again achieved best_acc = 1.0 with perfect ternary TPR and correct ternary-sweep AUC = 1.0 on this reduced setup.

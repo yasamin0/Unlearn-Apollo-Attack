@@ -1,0 +1,252 @@
+[ALL RUNS LOG - UPDATED AFTER 4 ATTACK RUNS]
+
+Project:
+Unlearn-Apollo-Attack
+
+Baseline fixed configuration:
+- model = ResNet18
+- dataset = CIFAR10
+- size_train = 20000
+- forget_perc = 0.1
+- unlearn = GradAscent
+- attack = Apollo_Offline
+- N = 50
+- num_shadow = 4
+- w = 1 4
+- baseline target/unlearn seed = 42
+
+Important methodological note:
+- The trustworthy Apollo metric is NOT the raw final-step un_conf / ov_conf based AUC.
+- The correct Apollo evaluation must be computed from ternary threshold sweep outputs:
+  - full_classifications
+  - threshold_data
+  - tpr_results
+- Therefore, the valid AUC is the empirical one-vs-rest AUC computed from the ternary sweep.
+- This correction was verified by inspecting the attack logic and ternary result files.
+
+==================================================
+RUN 1
+==================================================
+Save path:
+save\attack_run1
+
+Attack seed:
+42
+
+Status:
+- completed successfully
+- summary file created
+- ternary file created
+- ternary all-results file created
+
+Best metrics:
+- best_idx = 420
+- best_acc = 1.0
+- best_threshold = [18.59924376, -17.53391099]
+- best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary sweep:
+- unlearn vs rest = 1.0
+- retain vs rest = 1.0
+- test vs rest = 1.0
+
+Interpretation:
+- Apollo_Offline achieved perfect ternary separation in run1.
+- This was the first successful end-to-end baseline attack run.
+
+==================================================
+RUN 2
+==================================================
+Save path:
+save\attack_run2
+
+Attack command used:
+python attack.py --model ResNet18 --dataset CIFAR10 --num_classes 10 --input_size 3 32 32 --target_path save\ResNet18-CIFAR10\train-20000\perc-0.1-class-None\GradAscent --num_shadow 4 --shadow_model ResNet18 --shadow_path save\ResNet18-CIFAR10\shadow-limited-20000 --atk Apollo_Offline --N 50 --w 1 4 --seed 1 --save_to save\attack_run2
+
+Attack seed:
+1
+
+Status:
+- completed successfully
+- summary file created
+- ternary file created
+- ternary all-results file created
+
+Best metrics:
+- best_idx = 420
+- best_acc = 1.0
+- best_threshold = [17.61196089, -17.53391099]
+- best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary sweep:
+- unlearn vs rest = 1.0
+- retain vs rest = 1.0
+- test vs rest = 1.0
+
+Interpretation:
+- run2 confirms the same perfect separation under a different attack seed.
+- Threshold changed slightly, but performance stayed identical.
+
+==================================================
+RUN 3
+==================================================
+Save path:
+save\attack_run3
+
+Attack command used:
+python attack.py --model ResNet18 --dataset CIFAR10 --num_classes 10 --input_size 3 32 32 --target_path save\ResNet18-CIFAR10\train-20000\perc-0.1-class-None\GradAscent --num_shadow 4 --shadow_model ResNet18 --shadow_path save\ResNet18-CIFAR10\shadow-limited-20000 --atk Apollo_Offline --N 50 --w 1 4 --seed 2 --save_to save\attack_run3
+
+Attack seed:
+2
+
+Status:
+- completed successfully
+- summary file created
+- ternary file created
+- ternary all-results file created
+
+Best metrics:
+- best_idx = 420
+- best_acc = 1.0
+- best_threshold = [18.1368897, -19.35539412]
+- best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary sweep:
+- unlearn vs rest = 1.0
+- retain vs rest = 1.0
+- test vs rest = 1.0
+
+Interpretation:
+- run3 again reproduces perfect ternary separation with a different attack seed.
+- Threshold values changed, but the attack outcome remained identical.
+
+==================================================
+RUN 4
+==================================================
+Save path:
+save\attack_run4
+
+Attack seed:
+3
+
+Status:
+- completed successfully
+- summary file created
+- ternary file created
+- ternary all-results file created
+
+Best metrics:
+- best_idx = 420
+- best_acc = 1.0
+- best_threshold = [17.69447935, -14.22004771]
+- best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary sweep:
+- unlearn vs rest = 1.0
+- retain vs rest = 1.0
+- test vs rest = 1.0
+
+Interpretation:
+- run4 also reproduces the same perfect result under another different attack seed.
+- This further strengthens attack-level reproducibility.
+
+==================================================
+CROSS-RUN COMPARISON
+==================================================
+
+Run summary:
+- run1: attack seed = 42, best_acc = 1.0, AUCs = 1.0 / 1.0 / 1.0
+- run2: attack seed = 1,  best_acc = 1.0, AUCs = 1.0 / 1.0 / 1.0
+- run3: attack seed = 2,  best_acc = 1.0, AUCs = 1.0 / 1.0 / 1.0
+- run4: attack seed = 3,  best_acc = 1.0, AUCs = 1.0 / 1.0 / 1.0
+
+Observed variation across runs:
+- best threshold changes across runs
+- number of ROC points can vary slightly across runs
+- final attack performance remains identical
+
+Stable findings across all 4 runs:
+- best_idx = 420 in all runs
+- best_acc = 1.0 in all runs
+- best_tpr(unlearn) = 1.0 in all runs
+- best_tpr(retain) = 1.0 in all runs
+- best_tpr(test) = 1.0 in all runs
+- empirical_AUC_one_vs_rest = 1.0 for all three classes in all runs
+
+Interpretation:
+- Apollo_Offline is highly stable in this reduced setup.
+- The result is reproducible at the ATTACK level across multiple seeds.
+- The separation remains perfect even when attack randomness changes.
+
+==================================================
+IMPORTANT SEED CLARIFICATION
+==================================================
+
+During attack execution, logs show:
+Unlearn Arguments Loaded: ... seed=42
+
+This does NOT mean the new attack run ignored the new seed.
+
+Meaning:
+- the displayed seed=42 belongs to the saved target/unlearn pipeline
+- that seed comes from the original pretrain/unlearn artifacts stored in target_path
+- the attack seed is the one passed directly in the attack command:
+  - run1 -> seed 42
+  - run2 -> seed 1
+  - run3 -> seed 2
+  - run4 -> seed 3
+
+Therefore:
+- runs 2/3/4 were genuinely executed with different ATTACK seeds
+- but they still used the same underlying pretrained/unlearned target model and same saved shadow models
+
+==================================================
+CURRENT THESIS INTERPRETATION
+==================================================
+
+What is already established:
+- the reduced baseline pipeline is now fixed and working
+- run1, run2, run3, and run4 all completed successfully
+- Apollo_Offline produces perfect ternary separation on this setup
+- the correct Apollo AUC is the ternary-sweep AUC, not the raw last-step AUC
+- attack-level reproducibility has been demonstrated across multiple seeds
+
+What is NOT yet established:
+- full-pipeline reproducibility is not yet tested
+- pretrain + unlearn + shadow generation have not been rerun with different seeds yet
+- therefore current reproducibility is only at the attack stage, not across the entire pipeline
+
+==================================================
+VERDICT
+==================================================
+
+Baseline status:
+- FIXED = YES
+
+Pipeline status:
+- END-TO-END WORKING = YES
+
+Run1 status:
+- SUCCESSFUL = YES
+
+Attack-level reproducibility across seeds:
+- CONFIRMED = YES
+
+Full pipeline reproducibility across seeds:
+- CONFIRMED = NO (NOT YET TESTED)
+
+Scientific takeaway at this stage:
+- In the current reduced setup, Apollo_Offline consistently achieves perfect ternary separation against the GradAscent-unlearned target model on CIFAR10.
+- The result is stable across multiple attack seeds.
+- The next stronger validation step would be to test full pipeline reproducibility by changing pretrain/unlearn/shadow seeds as well.
+
+==================================================
+NEXT STEP
+==================================================
+
+Recommended next step:
+- keep these 4 runs as the confirmed attack-level reproducibility evidence
+- then decide whether to:
+  1) move to full-pipeline reproducibility
+  2) start designing and testing the proposed attack
+  3) prepare presentation material based on Apollo architecture + current baseline results

@@ -1,0 +1,88 @@
+Experiment identity:
+
+run = attack_run2
+
+attack seed = 1
+
+baseline target/unlearn seed = 42
+
+model = ResNet18
+
+dataset = CIFAR10
+
+size_train = 20000
+
+forget_perc = 0.1
+
+unlearn = GradAscent
+
+attack = Apollo_Offline
+
+N = 50
+
+num_shadow = 4
+
+w = 1 4
+
+Output paths:
+
+summary file:
+save\attack_run2\ResNet18-CIFAR10\perc-0.1-class-None\summary\Apollo_Offline-GradAscent.pkl
+
+ternary file:
+save\attack_run2\ResNet18-CIFAR10\perc-0.1-class-None\ternary\Apollo_Offline-GradAscent-Unified.pkl
+
+ternary all results file:
+save\attack_run2\ResNet18-CIFAR10\perc-0.1-class-None\ternary\Apollo_Offline-GradAscent-Unified-all-results.pkl
+
+Best ternary result:
+
+best_idx = 420
+
+best_acc = 1.0
+
+best_threshold = [17.61196089, -17.53391099]
+
+best_tpr = {'unlearn': 1.0, 'retain': 1.0, 'test': 1.0}
+
+Correct Apollo AUC from ternary threshold sweep:
+
+AUC_unlearn_vs_rest = 1.0
+
+AUC_retain_vs_rest = 1.0
+
+AUC_test_vs_rest = 1.0
+
+Interpretation:
+
+run2 fully reproduced the strong run1 behavior under a different attack seed
+
+threshold changed slightly compared with run1
+
+final separation quality did not change
+
+Apollo_Offline again achieved perfect ternary separation for unlearn, retain, and test
+
+Comparison with run1:
+
+run1 seed = 42
+
+run2 seed = 1
+
+run1 best_threshold = [18.59924376, -17.53391099]
+
+run2 best_threshold = [17.61196089, -17.53391099]
+
+run1 and run2 both reached:
+
+best_acc = 1.0
+
+best_tpr = 1.0 for all three classes
+
+AUC = 1.0 for all three one-vs-rest evaluations
+
+Conclusion:
+
+run2 supports attack-level reproducibility of the reduced baseline
+
+changing only the attack seed did not affect the final attack success on this setup

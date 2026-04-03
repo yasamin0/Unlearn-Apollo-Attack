@@ -1,0 +1,235 @@
+Six-run plan for baseline validation and proposed attack development
+
+Run 1:
+Name: baseline_fixed
+Status: completed
+Goal: establish the first fully successful baseline run
+Setup:
+
+ResNet18
+
+CIFAR10
+
+size_train = 20000
+
+forget_perc = 0.1
+
+unlearn = GradAscent
+
+attack = Apollo_Offline
+
+N = 50
+
+num_shadow = 4
+
+w = 1 4
+
+attack seed = 42
+
+baseline target/unlearn seed = 42
+
+Recorded result:
+
+best accuracy = 1.0
+
+best threshold = [18.59924376, -17.53391099]
+
+best ternary TPR = unlearn 1.0, retain 1.0, test 1.0
+
+empirical ternary AUC = 1.0 for unlearn, retain, and test
+
+Note:
+
+this run is the current reference baseline
+
+Run 2:
+Name: baseline_repro_seed1
+Status: completed
+Goal: verify that the baseline result is reproducible with a different attack seed
+Change from Run 1:
+
+attack seed = 1
+
+Everything else:
+
+unchanged from baseline_fixed
+
+Recorded result:
+
+best accuracy = 1.0
+
+best threshold = [17.61196089, -17.53391099]
+
+best ternary TPR = unlearn 1.0, retain 1.0, test 1.0
+
+empirical ternary AUC = 1.0 for unlearn, retain, and test
+
+Decision use:
+
+confirms that the attack result remains unchanged under a different attack seed
+
+Run 3:
+Name: baseline_repro_seed2
+Status: completed
+Goal: perform a second attack-level reproducibility check
+Change from Run 1:
+
+attack seed = 2
+
+Everything else:
+
+unchanged from baseline_fixed
+
+Recorded result:
+
+best accuracy = 1.0
+
+best threshold = [18.1368897, -19.35539412]
+
+best ternary TPR = unlearn 1.0, retain 1.0, test 1.0
+
+empirical ternary AUC = 1.0 for unlearn, retain, and test
+
+Decision use:
+
+confirms that the same separation pattern still holds under another attack seed
+
+Run 4:
+Name: baseline_repro_seed3
+Status: completed
+Goal: perform a third attack-level reproducibility check
+Change from Run 1:
+
+attack seed = 3
+
+Everything else:
+
+unchanged from baseline_fixed
+
+Recorded result:
+
+best accuracy = 1.0
+
+best threshold = [17.69447935, -14.22004771]
+
+best ternary TPR = unlearn 1.0, retain 1.0, test 1.0
+
+empirical ternary AUC = 1.0 for unlearn, retain, and test
+
+Decision use:
+
+confirms that the reduced baseline is stable across four completed attack runs
+
+Run 5:
+Name: apollo_architecture_analysis
+Status: planned
+Goal: document Apollo clearly for thesis writing and presentation
+
+Focus:
+
+explain Apollo threat model
+
+explain label-only setting
+
+explain role of shadow models
+
+explain adversarial search for x'
+
+explain under-unlearning and over-unlearning intuition
+
+explain ternary threshold sweep and why this is the correct evaluation path in the current codebase
+
+Expected output:
+
+clean architecture notes
+
+one presentation-ready Apollo diagram
+
+one short explanation of why raw final-step un_conf / ov_conf is not the final metric
+
+one clear explanation of why the current reduced setup is still academically meaningful
+
+Run 6:
+Name: proposed_attack_design_v1
+Status: planned
+Goal: define the first concrete version of the proposed attack
+
+Prerequisite:
+
+Apollo architecture and logic must be clearly documented first
+
+Focus:
+
+define the proposed attack idea in a simple and explainable form
+
+specify attack input
+
+specify attack score or decision rule
+
+specify how it differs from Apollo
+
+specify what can realistically be implemented and tested next
+
+Expected output:
+
+first written design of the proposed attack
+
+initial pseudo-pipeline
+
+first comparison criteria against Apollo baseline
+
+material for presentation slide on proposed method
+
+Overall rule:
+
+Runs 1 to 4 are completed baseline/Apollo reproducibility runs
+
+Runs 5 and 6 are now reserved for architecture explanation and proposed attack design
+
+during baseline-fixing work, the baseline configuration must stay fixed except for explicitly planned attack-seed changes
+
+every run or design step must be logged with configuration, output path, best accuracy, best TPRs, empirical ternary AUC, and notes
+
+Current assessment after four completed runs:
+
+the reduced baseline is no longer supported by only a single successful run
+
+attack-level reproducibility is now supported by four completed runs
+
+all four runs produced:
+
+best_acc = 1.0
+
+TPR_unlearn = 1.0
+
+TPR_retain = 1.0
+
+TPR_test = 1.0
+
+AUC_unlearn_vs_rest = 1.0
+
+AUC_retain_vs_rest = 1.0
+
+AUC_test_vs_rest = 1.0
+
+only the best threshold changed from run to run
+
+this should currently be interpreted as stability of Apollo_Offline under the fixed reduced setup
+
+Important limitation:
+
+this is not yet full-pipeline multi-seed reproducibility
+
+the target model, unlearning artifacts, and shadow models are still tied to the same original baseline pipeline
+
+full reproducibility later should regenerate pretrain + unlearn + shadow + attack under new seeds
+
+End goal of the six runs:
+
+confirm that the baseline is real and stable
+
+explain Apollo clearly and correctly
+
+design the proposed attack in a concrete, thesis-usable form
+
+prepare material for thesis writing and presentation

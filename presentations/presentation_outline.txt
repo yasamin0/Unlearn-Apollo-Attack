@@ -1,0 +1,13 @@
+Slide 1: Title
+Slide 2: Problem statement
+Slide 3: Why machine unlearning matters
+Slide 4: Apollo overview
+Slide 5: Experimental setup
+Slide 6: Baseline pipeline
+Slide 7: Apollo architecture
+Slide 8: Baseline run 1 result
+Slide 9: Motivation for proposed attack
+Slide 10: Proposed attack idea
+Slide 11: Proposed architecture
+Slide 12: Preliminary comparison
+Slide 13: Conclusion

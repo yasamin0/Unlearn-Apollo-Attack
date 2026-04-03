@@ -1,0 +1,40 @@
+Run ID: attack_run1
+Date: 2026-03-11
+
+Configuration
+Model: ResNet18
+Dataset: CIFAR10
+Train size: 20000
+Unlearn method: GradAscent
+Forget perc: 0.1
+Attack: Apollo_Offline
+N: 50
+Num shadow: 4
+w: 1 4
+Seed: 42
+
+Best-point results
+best_idx = 420
+best_acc = 1.0
+best_threshold = [18.59924376, -17.53391099]
+best_tpr_unlearn = 1.0
+best_tpr_retain = 1.0
+best_tpr_test = 1.0
+
+Empirical ternary AUC
+empirical_auc_unlearn_vs_rest = 1.0
+empirical_auc_retain_vs_rest = 1.0
+empirical_auc_test_vs_rest = 1.0
+
+Sanity checks
+sanity_check_split_disjoint = passed
+sanity_check_shadow_target_overlap = passed
+
+Interpretation
+- The baseline pipeline completed successfully from pretrain to unlearning and Apollo attack evaluation.
+- On this reduced setup, Apollo_Offline achieved perfect ternary separation at the best operating point.
+- The empirical AUC values above are computed from the ternary threshold sweep, not from raw final-step un_conf or ov_conf values alone.
+
+Use in later comparison
+- This file should be treated as the reference metric record for baseline run 1.
+- Future runs should be compared against this run using the same metric definitions.
