@@ -18,6 +18,8 @@ import attacks
 from models import create_model
 from dataset import create_dataset
 from attacks.iris_v1 import IRISV1Attack
+from attacks.iris_v2 import IRISV2Attack
+from attacks.iris_v3 import IRIS_V3
 from iris_eval import evaluate_iris_summary
 from iris_save import build_iris_paths, save_pickle, save_text, build_iris_report
 from iris_sanity import run_basic_iris_sanity_checks
@@ -65,8 +67,13 @@ def main():
     parser.add_argument('--iris_large_radius', type=float, default=0.50)
     parser.add_argument('--iris_num_queries_small', type=int, default=20)
     parser.add_argument('--iris_num_queries_large', type=int, default=20)
-    parser.add_argument('--iris_score_mode', type=str, default='difference')
-
+    parser.add_argument('--iris_score_mode', type=str, default='shadow_sum')
+    parser.add_argument('--iris_probe_radius', type=float, default=0.10)
+    parser.add_argument('--iris_probe_steps', type=int, default=8)
+    parser.add_argument('--iris_probe_samples', type=int, default=12)
+    parser.add_argument('--iris_use_relative_score', action='store_true')
+    parser.add_argument('--iris_use_early_features', action='store_true')
+    parser.add_argument('--iris_early_k', type=int, default=5)
     parser.add_argument('--save_to',        type=str,   required=True,      help='save results to this path')
     parser.add_argument('--debug',                      action="store_true")
 
@@ -124,7 +131,68 @@ def main():
     # print(data_split.items())
     print("Models Loaded")
 
-        # IRIS_v1 branch
+    # IRIS_v3 branch
+    if args.atk == "IRIS_v3":
+        Atk = IRIS_V3(
+            target_model=target_model,
+            dataset=dataset,
+            shadow_models=shadow_models,
+            args=args,
+            idxs=target_idxs,
+            shadow_col=data_split["shadow_col"],
+            unlearn_args=unlearn_args,
+        )
+
+        time_col = []
+        for name, loader in target_loaders.items():
+            print(name)
+            for i, (input, label) in enumerate(loader):
+                Atk.set_include_exclude(target_idx=target_idxs[name][i])
+                start_time = time.time()
+                input, label = input.to(DEVICE), label.to(torch.int64).to(DEVICE)
+                end_time = time.time()
+                time_col.append(end_time - start_time)
+                Atk.update_atk_summary(name, input, label, target_idxs[name][i])
+
+        print("Time Used:", np.mean(time_col), np.std(time_col))
+
+        base_path = os.path.join(
+            args.save_to,
+            f"{unlearn_args.model}-{unlearn_args.dataset}",
+            f"perc-{unlearn_args.forget_perc}-class-{unlearn_args.forget_class}"
+        )
+        summary_path = os.path.join(base_path, "summary")
+        if not os.path.exists(summary_path):
+            os.makedirs(summary_path)
+
+        with open(os.path.join(summary_path, f"{args.atk}-{unlearn_args.unlearn}.pkl"), "wb") as f:
+            pkl.dump(Atk.get_atk_summary(), f)
+
+        ternary_path = os.path.join(base_path, "ternary")
+        if not os.path.exists(ternary_path):
+            os.makedirs(ternary_path)
+
+        for type_name in Atk.types:
+            results = Atk.get_ternary_results(type=type_name)
+
+            if isinstance(results, dict):
+                ternary_data = results
+            else:
+                ternary_points, threshold_data = results
+                ternary_data = {"ternary_points": ternary_points, "threshold_data": threshold_data}
+
+            with open(os.path.join(ternary_path, f"{args.atk}-{unlearn_args.unlearn}-{type_name}.pkl"), "wb") as f:
+                pkl.dump(ternary_data, f)
+
+            with open(os.path.join(ternary_path, f"{args.atk}-{unlearn_args.unlearn}-{type_name}-all-results.pkl"), "wb") as f:
+                pkl.dump(results, f)
+
+        print("=" * 80)
+        print("IRIS_v3 run completed.")
+        print("=" * 80)
+        return
+
+    # IRIS_v1 branch
     if args.atk == "IRIS_v1":
         iris_attack = IRISV1Attack(
             model=target_model,
@@ -140,7 +208,7 @@ def main():
         }
 
         start_time = time.time()
-        summary = iris_attack.run(target_groups)
+        summary = iris_attack.run(target_groups, target_idxs)
         end_time = time.time()
 
         print(f"IRIS attack run finished in {end_time - start_time:.4f} seconds")
@@ -163,14 +231,16 @@ def main():
         save_pickle(summary, paths["summary_path"])
         save_pickle(eval_results, paths["eval_path"])
 
-        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
-
         run_name = args.save_to.replace("\\", "/").rstrip("/").split("/")[-1]
         report_text = build_iris_report(
             run_name=run_name,
             args=args,
             best_metrics=eval_results["best_metrics"],
         )
+
+        save_text(report_text, paths["report_path"])
+
+        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
 
         report_text += "\n\nSanity checks:\n"
         report_text += f"passed = {sanity_results['passed']}\n"
@@ -183,6 +253,78 @@ def main():
 
         print("=" * 80)
         print("IRIS_v1 run completed.")
+        print(f"Summary saved to: {paths['summary_path']}")
+        print(f"Eval saved to: {paths['eval_path']}")
+        print(f"Report saved to: {paths['report_path']}")
+        print("Best metrics:")
+        for k, v in eval_results["best_metrics"].items():
+            print(f"  {k}: {v}")
+        print("Sanity:")
+        print(f"  passed: {sanity_results['passed']}")
+        print("=" * 80)
+        return
+    
+    # IRIS_v2 branch
+    if args.atk == "IRIS_v2":
+        iris_attack = IRISV2Attack(
+            model=target_model,
+            shadow_models=shadow_models,
+            args=args,
+            device=DEVICE,
+        )
+
+        target_groups = {
+            "unlearn": target_loaders["unlearn"],
+            "retain": target_loaders["retain"],
+            "test": target_loaders["test"],
+        }
+
+        start_time = time.time()
+        summary = iris_attack.run(target_groups, target_idxs)
+        end_time = time.time()
+
+        print(f"IRIS_v2 attack run finished in {end_time - start_time:.4f} seconds")
+
+        eval_results = evaluate_iris_summary(summary)
+
+        forget_class = getattr(unlearn_args, "forget_class", None)
+        unlearn_method = getattr(unlearn_args, "unlearn", "GradAscent")
+
+        paths = build_iris_paths(
+            save_to=args.save_to,
+            model=unlearn_args.model,
+            dataset=unlearn_args.dataset,
+            forget_perc=unlearn_args.forget_perc,
+            class_name=forget_class,
+            unlearn_method=unlearn_method,
+            attack_name=args.atk,
+        )
+
+        save_pickle(summary, paths["summary_path"])
+        save_pickle(eval_results, paths["eval_path"])
+
+        run_name = args.save_to.replace("\\", "/").rstrip("/").split("/")[-1]
+        report_text = build_iris_report(
+            run_name=run_name,
+            args=args,
+            best_metrics=eval_results["best_metrics"],
+        )
+
+        save_text(report_text, paths["report_path"])
+
+        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
+
+        report_text += "\n\nSanity checks:\n"
+        report_text += f"passed = {sanity_results['passed']}\n"
+        report_text += f"group_disjoint = {sanity_results['group_disjoint']['passed']}\n"
+        report_text += f"score_lengths = {sanity_results['score_lengths']['passed']}\n"
+        if sanity_results["output_files"] is not None:
+            report_text += f"output_files = {sanity_results['output_files']['passed']}\n"
+
+        save_text(report_text, paths["report_path"])
+
+        print("=" * 80)
+        print("IRIS_v2 run completed.")
         print(f"Summary saved to: {paths['summary_path']}")
         print(f"Eval saved to: {paths['eval_path']}")
         print(f"Report saved to: {paths['report_path']}")

@@ -149,21 +149,22 @@ class IRISV1Attack:
 
         raise ValueError("Unsupported batch format for IRISV1Attack._unpack_batch")
 
-    def run_group(self, group_loader) -> Dict[int, Dict[str, Any]]:
+    def run_group(self, group_loader, group_ids) -> Dict[int, Dict[str, Any]]:
         group_results: Dict[int, Dict[str, Any]] = {}
-        running_id = 0
 
+        sample_counter = 0
         for batch in group_loader:
-            items = self._unpack_batch(batch, fallback_start_id=running_id)
-            for sample_id, x, y in items:
-                group_results[int(sample_id)] = self.score_sample(x, y)
-                running_id += 1
+            items = self._unpack_batch(batch, fallback_start_id=sample_counter)
+            for _, x, y in items:
+                real_sample_id = int(group_ids[sample_counter])
+                group_results[real_sample_id] = self.score_sample(x, y)
+                sample_counter += 1
 
         return group_results
 
-    def run(self, target_groups: Dict[str, Any]) -> Dict[str, Dict[int, Dict[str, Any]]]:
+    def run(self, target_groups: Dict[str, Any], target_idxs: Dict[str, Any]) -> Dict[str, Dict[int, Dict[str, Any]]]:
         return {
-            "unlearn": self.run_group(target_groups["unlearn"]),
-            "retain": self.run_group(target_groups["retain"]),
-            "test": self.run_group(target_groups["test"]),
+            "unlearn": self.run_group(target_groups["unlearn"], target_idxs["unlearn"]),
+            "retain": self.run_group(target_groups["retain"], target_idxs["retain"]),
+            "test": self.run_group(target_groups["test"], target_idxs["test"]),
         }
