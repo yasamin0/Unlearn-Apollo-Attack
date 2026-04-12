@@ -45,6 +45,7 @@ class IRIS_V3(Apollo_Offline):
         logits = []
         with torch.no_grad():
             for m in self.shadow_models:
+                self._qa_shadow(1)
                 out = m(x)
                 logits.append(out)
         return torch.mean(torch.stack(logits, dim=0), dim=0)
@@ -55,6 +56,7 @@ class IRIS_V3(Apollo_Offline):
         target logit on true class - mean shadow logit on true class
         """
         with torch.no_grad():
+            self._qa_target(1)
             t_out = self.target_model(x)
             s_out = self._shadow_logits_mean(x)
             cls = target_label.item()
@@ -71,6 +73,8 @@ class IRIS_V3(Apollo_Offline):
 
         with torch.no_grad():
             # include original point as candidate
+            shadow_count = len(self.shadow_models)
+            self._qa_shadow(shadow_count)
             base_loss = loss_func(best_x, target_label).item()
             best_loss = base_loss
             best_probe_score = 0.0
@@ -82,7 +86,8 @@ class IRIS_V3(Apollo_Offline):
 
                 candidate = target_input + self.iris_probe_radius * direction
                 candidate = torch.clamp(candidate, 0.0, 1.0)
-
+                shadow_count = len(self.shadow_models)
+                self._qa_shadow(shadow_count)
                 cand_loss = loss_func(candidate, target_label).item()
                 if cand_loss > best_loss:
                     best_loss = cand_loss
@@ -133,6 +138,11 @@ class IRIS_V3(Apollo_Offline):
 
         for epoch in range(self.args.atk_epochs):
             optimizer.zero_grad()
+
+            self._qa_steps(1)
+            shadow_count = len(self.shadow_models)
+            self._qa_shadow(shadow_count)
+
             loss = loss_func(adv_input, target_label)
             loss.backward()
             optimizer.step()
@@ -144,6 +154,7 @@ class IRIS_V3(Apollo_Offline):
                 adv_input.data.clamp_(0.0, 1.0)
 
             with torch.no_grad():
+                self._qa_target(1)
                 target_output = self.target_model(adv_input)
                 target_pred = target_output.max(1)[1].item()
                 pred.append(target_pred)
@@ -151,6 +162,7 @@ class IRIS_V3(Apollo_Offline):
                 # Apollo-like confidence track, but keep it relative-aware if desired
                 shadow_conf = 0.0
                 for m in self.shadow_models:
+                    self._qa_shadow(1)
                     shadow_output = m(adv_input)
                     shadow_logit = shadow_output[0, target_label.item()].item()
                     shadow_conf += shadow_logit

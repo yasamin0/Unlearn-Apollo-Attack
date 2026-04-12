@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from tqdm import tqdm
-
+from query_audit import QueryAudit
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,7 +20,25 @@ class Apollo(Attack_Framework):
         self.unlearned_shadow_models = nn.ModuleList()
         for i in range(self.args.num_shadow):
             self.unlearned_shadow_models.append(self.get_unlearned_model(i))
+            self.query_audit = QueryAudit()
+    def _qa_start(self, group_name, sample_id):
+        self.query_audit.start_sample(group_name, int(sample_id))
 
+    def _qa_target(self, n=1):
+        self.query_audit.add_target(n)
+
+    def _qa_shadow(self, n=1):
+        self.query_audit.add_shadow(n)
+
+    def _qa_steps(self, n=1):
+        self.query_audit.add_steps(n)
+
+    def _qa_end(self):
+        self.query_audit.end_sample()
+
+    def get_query_audit_summary(self):
+        return self.query_audit.summary()
+    
     def set_include_exclude(self, target_idx):
         super().set_include_exclude(target_idx)
         if (len(self.include)):
@@ -63,6 +81,18 @@ class Apollo(Attack_Framework):
         
         for epoch in range(self.args.atk_epochs):
             optimizer.zero_grad()
+
+            # one optimizer step
+            self._qa_steps(1)
+
+            # loss_func uses shadow forwards
+            shadow_count = 0
+            if hasattr(self, "include") and hasattr(self, "exclude"):
+                shadow_count = len(self.include) + len(self.exclude)
+            else:
+                shadow_count = len(self.shadow_models)
+            self._qa_shadow(shadow_count)
+
             loss = loss_func(adv_input, target_label)
             loss.backward()
             optimizer.step()
@@ -74,6 +104,7 @@ class Apollo(Attack_Framework):
                 adv_input.data.clamp_(0.0, 1.0)
 
             with torch.no_grad():
+                self._qa_target(1)
                 target_output = self.target_model(adv_input)
                 target_pred = target_output.max(1)[1].item()
                 pred.append(target_pred)
@@ -82,6 +113,7 @@ class Apollo(Attack_Framework):
                 shadow_conf = 0.
                 if len(self.exclude) > 0:
                     for i in self.exclude:
+                        self._qa_shadow(1)
                         shadow_output = self.shadow_models[i](adv_input)
                         shadow_logit = shadow_output[0, target_label.item()].item()
                         shadow_conf += shadow_logit
@@ -93,6 +125,7 @@ class Apollo(Attack_Framework):
     def update_atk_summary(self, name, target_input, target_label, idx):
         if (not name in self.summary):
             self.summary[name] = dict()
+        self._qa_start(name, idx)
         un_conf, un_pred = self.Un_Adv(target_input, target_label, self.batched_loss_Under)
         ov_conf, ov_pred = self.Un_Adv(target_input, target_label, self.batched_loss_Over)
         self.summary[name][idx] = {
@@ -103,6 +136,7 @@ class Apollo(Attack_Framework):
             "ov_conf"       : ov_conf,
             "ov_pred"       : ov_pred,
         }
+        self._qa_end()
         return None
 
     def get_ternary_results(self, **kwargs):
@@ -286,7 +320,8 @@ class Apollo_Offline(Apollo):
     def __init__(self, target_model, dataset, shadow_models, args, idxs, shadow_col, unlearn_args):
         Attack_Framework.__init__(self, target_model, dataset, shadow_models, args, idxs, shadow_col, unlearn_args)
         self.types = ["Unified"]  # Single unified attack type
-
+        self.query_audit = QueryAudit()
+        
     def set_include_exclude(self, target_idx):
         Attack_Framework.set_include_exclude(self, target_idx)
         self.temp, self.params, self.buffers = batched_models_(self.shadow_models)

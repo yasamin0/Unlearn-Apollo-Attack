@@ -187,11 +187,27 @@ def main():
             with open(os.path.join(ternary_path, f"{args.atk}-{unlearn_args.unlearn}-{type_name}-all-results.pkl"), "wb") as f:
                 pkl.dump(results, f)
 
+        audit_dir = os.path.join(base_path, "query_audit")
+        if not os.path.exists(audit_dir):
+            os.makedirs(audit_dir)
+
+        audit_json_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.json")
+        audit_txt_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.txt")
+
+        Atk.query_audit.save_json(audit_json_path)
+        Atk.query_audit.save_text(audit_txt_path)
+
+        print("Query audit saved to:")
+        print(audit_json_path)
+        print(audit_txt_path)
+        print("Query summary:")
+        print(Atk.get_query_audit_summary())
+
         print("=" * 80)
         print("IRIS_v3 run completed.")
         print("=" * 80)
         return
-
+    
     # IRIS_v1 branch
     if args.atk == "IRIS_v1":
         iris_attack = IRISV1Attack(
@@ -380,12 +396,9 @@ def main():
     for type in Atk.types:
         results = Atk.get_ternary_results(type=type)
         
-        # Handle different return formats (new comprehensive results vs old tuple format)
         if isinstance(results, dict):
-            # New format with comprehensive results
             ternary_data = results
         else:
-            # Old format - convert to new format for compatibility
             ternary_points, threshold_data = results
             ternary_data = {"ternary_points": ternary_points, "threshold_data": threshold_data}
         
@@ -393,6 +406,22 @@ def main():
             pkl.dump(ternary_data, f)
         with open(os.path.join(ternary_path, f"{args.atk}-{unlearn_args.unlearn}-{type}-all-results.pkl"), "wb") as f:
             pkl.dump(results, f)
+
+    audit_dir = os.path.join(base_path, "query_audit")
+    if not os.path.exists(audit_dir):
+        os.makedirs(audit_dir)
+
+    audit_json_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.json")
+    audit_txt_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.txt")
+
+    Atk.query_audit.save_json(audit_json_path)
+    Atk.query_audit.save_text(audit_txt_path)
+
+    print("Query audit saved to:")
+    print(audit_json_path)
+    print(audit_txt_path)
+    print("Query summary:")
+    print(Atk.get_query_audit_summary())
 
 if __name__ == '__main__':
     main()
