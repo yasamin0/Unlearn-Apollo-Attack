@@ -195,6 +195,8 @@ class IRIS_V3(Apollo_Offline):
         if name not in self.summary:
             self.summary[name] = dict()
 
+        self._qa_start(name, idx)
+
         under = self.IRIS_Adv(target_input, target_label, self.batched_loss_Under, mode="under")
         over = self.IRIS_Adv(target_input, target_label, self.batched_loss_Over, mode="over")
 
@@ -223,6 +225,8 @@ class IRIS_V3(Apollo_Offline):
             "un_full_max": under["full_max"],
             "ov_full_max": over["full_max"],
         }
+
+        self._qa_end()
         return None
 
     def get_ternary_results(self, **kwargs):
