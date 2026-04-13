@@ -23,6 +23,8 @@ from attacks.iris_v3 import IRIS_V3
 from iris_eval import evaluate_iris_summary
 from iris_save import build_iris_paths, save_pickle, save_text, build_iris_report
 from iris_sanity import run_basic_iris_sanity_checks
+from attacks.iris_binary_directional import IRISBinaryDirectional
+from iris_binary_eval import evaluate_iris_binary_summary
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -75,6 +77,11 @@ def main():
     parser.add_argument('--iris_use_early_features', action='store_true')
     parser.add_argument('--iris_early_k', type=int, default=5)
     parser.add_argument('--save_to',        type=str,   required=True,      help='save results to this path')
+    parser.add_argument('--iris_num_directions', type=int, default=8)
+    parser.add_argument('--iris_radius_min', type=float, default=0.02)
+    parser.add_argument('--iris_radius_max', type=float, default=0.30)
+    parser.add_argument('--iris_radius_steps', type=int, default=8)
+    parser.add_argument('--iris_binary_threshold', type=float, default=0.50)
     parser.add_argument('--debug',                      action="store_true")
 
     parser.add_argument('--seed',           type=int,   default=42,         help='random seed (default: 42)')
@@ -131,6 +138,103 @@ def main():
     # print(data_split.items())
     print("Models Loaded")
 
+    # IRIS_binary_directional branch
+    if args.atk == "IRIS_binary_directional":
+        iris_attack = IRISBinaryDirectional(
+            model=target_model,
+            args=args,
+            device=DEVICE,
+        )
+
+        target_groups = {
+            "unlearn": target_loaders["unlearn"],
+            "retain": target_loaders["retain"],
+            "test": target_loaders["test"],
+        }
+
+        start_time = time.time()
+        summary = iris_attack.run(target_groups, target_idxs)
+        end_time = time.time()
+
+        print(f"IRIS_binary_directional run finished in {end_time - start_time:.4f} seconds")
+
+        eval_results = evaluate_iris_binary_summary(summary)
+
+        forget_class = getattr(unlearn_args, "forget_class", None)
+        unlearn_method = getattr(unlearn_args, "unlearn", "GradAscent")
+
+        paths = build_iris_paths(
+            save_to=args.save_to,
+            model=unlearn_args.model,
+            dataset=unlearn_args.dataset,
+            forget_perc=unlearn_args.forget_perc,
+            class_name=forget_class,
+            unlearn_method=unlearn_method,
+            attack_name=args.atk,
+        )
+
+        save_pickle(summary, paths["summary_path"])
+        save_pickle(eval_results, paths["eval_path"])
+
+        run_name = args.save_to.replace("\\", "/").rstrip("/").split("/")[-1]
+        report_text = build_iris_report(
+            run_name=run_name,
+            args=args,
+            best_metrics=eval_results["best_metrics"],
+        )
+
+        save_text(report_text, paths["report_path"])
+
+        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
+
+        report_text += "\n\nBinary evaluation:\n"
+        report_text += f"auc_unlearn_vs_nonunlearn = {eval_results['auc_unlearn_vs_nonunlearn']}\n"
+        report_text += f"num_unlearn = {eval_results['num_unlearn']}\n"
+        report_text += f"num_nonunlearn = {eval_results['num_nonunlearn']}\n"
+
+        report_text += "\nSanity checks:\n"
+        report_text += f"passed = {sanity_results['passed']}\n"
+        report_text += f"group_disjoint = {sanity_results['group_disjoint']['passed']}\n"
+        report_text += f"score_lengths = {sanity_results['score_lengths']['passed']}\n"
+        if sanity_results["output_files"] is not None:
+            report_text += f"output_files = {sanity_results['output_files']['passed']}\n"
+
+        save_text(report_text, paths["report_path"])
+
+        # save query audit
+        base_path = os.path.join(
+            args.save_to,
+            f"{unlearn_args.model}-{unlearn_args.dataset}",
+            f"perc-{unlearn_args.forget_perc}-class-{unlearn_args.forget_class}"
+        )
+        audit_dir = os.path.join(base_path, "query_audit")
+        if not os.path.exists(audit_dir):
+            os.makedirs(audit_dir)
+
+        audit_json_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.json")
+        audit_txt_path = os.path.join(audit_dir, f"{args.atk}-{unlearn_args.unlearn}.txt")
+
+        iris_attack.query_audit.save_json(audit_json_path)
+        iris_attack.query_audit.save_text(audit_txt_path)
+
+        print("=" * 80)
+        print("IRIS_binary_directional run completed.")
+        print(f"Summary saved to: {paths['summary_path']}")
+        print(f"Eval saved to: {paths['eval_path']}")
+        print(f"Report saved to: {paths['report_path']}")
+        print(f"Query audit JSON: {audit_json_path}")
+        print(f"Query audit TXT: {audit_txt_path}")
+        print("Best metrics:")
+        for k, v in eval_results["best_metrics"].items():
+            print(f"  {k}: {v}")
+        print(f"AUC unlearn vs non-unlearn: {eval_results['auc_unlearn_vs_nonunlearn']}")
+        print("Query summary:")
+        print(iris_attack.get_query_audit_summary())
+        print("Sanity:")
+        print(f"  passed: {sanity_results['passed']}")
+        print("=" * 80)
+        return
+    
     # IRIS_v3 branch
     if args.atk == "IRIS_v3":
         Atk = IRIS_V3(
