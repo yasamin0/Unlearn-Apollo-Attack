@@ -10,13 +10,18 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class IRISBinaryDirectional:
     """
-    Improved IRIS binary directional attack.
+    IRIS binary attack - disagreement based version
 
-    Main changes:
-    - shadow-assisted calibration
-    - score centering with relative z-features
-    - richer diagnostics
-    - less biased score distribution around zero
+    Goal:
+    - more Apollo-like than pure local instability
+    - still lower-query than Apollo
+    - binary task:
+        positive = unlearn
+        negative = retain + test
+
+    Key idea:
+    score a sample by how abnormal the target model's directional behavior is
+    relative to the shadow ensemble.
     """
 
     def __init__(self, model, shadow_models, args, device=None):
@@ -33,7 +38,7 @@ class IRISBinaryDirectional:
 
         self.clamp_min = 0.0
         self.clamp_max = 1.0
-        self.eps_std = 1e-6
+        self.eps = 1e-8
         self.max_abs_z = 5.0
 
         self.model.eval()
@@ -89,25 +94,11 @@ class IRISBinaryDirectional:
             return self.random_unit_direction(x)
         return d / norm
 
-    def probe_direction_for_model(
-        self,
-        model,
-        x: torch.Tensor,
-        clean_label: int,
-        direction: torch.Tensor,
-        radius_schedule: List[float],
-        is_target: bool,
-    ) -> Dict[str, Any]:
-        labels_along_path = []
+    def _extract_path_stats_from_labels(self, labels_along_path: List[int], clean_label: int, radius_schedule: List[float]) -> Dict[str, Any]:
         flip_positions = []
         alt_labels = []
 
-        for i, r in enumerate(radius_schedule):
-            z = x + r * direction
-            z = torch.clamp(z, min=self.clamp_min, max=self.clamp_max)
-            pred = self.get_hard_label(model, z, is_target=is_target)
-            labels_along_path.append(int(pred))
-
+        for i, pred in enumerate(labels_along_path):
             if pred != clean_label:
                 flip_positions.append(i)
                 alt_labels.append(int(pred))
@@ -144,7 +135,6 @@ class IRISBinaryDirectional:
             for a, b in zip(labels_along_path[:-1], labels_along_path[1:]):
                 if a != b:
                     transition_count += 1
-
             oscillation_score = float(transition_count / max(len(labels_along_path) - 1, 1))
 
             stable_after_first = 1.0
@@ -168,222 +158,202 @@ class IRISBinaryDirectional:
             "stable_after_first": float(stable_after_first),
         }
 
-    def aggregate_directional_features(
+    def _probe_target_and_shadows_single_direction(
         self,
-        direction_results: List[Dict[str, Any]],
+        x: torch.Tensor,
+        direction: torch.Tensor,
         radius_schedule: List[float],
-    ) -> Dict[str, float]:
-        max_radius = float(radius_schedule[-1])
-        no_flip_flags = np.array([int(r["no_flip"]) for r in direction_results], dtype=float)
-        flip_flags = 1.0 - no_flip_flags
+    ) -> Dict[str, Any]:
+        target_clean = self.get_hard_label(self.model, x, is_target=True)
 
-        flip_fraction = float(np.mean(flip_flags))
-        no_flip_fraction = float(np.mean(no_flip_flags))
+        shadow_clean_labels = []
+        for sm in self.shadow_models:
+            shadow_clean_labels.append(self.get_hard_label(sm, x, is_target=False))
 
-        flip_radii = [r["first_flip_radius"] for r in direction_results if not r["no_flip"]]
-        persistences = [r["persistence_after_flip"] for r in direction_results if not r["no_flip"]]
-        flip_count_ratios = [r["flip_count_ratio"] for r in direction_results if not r["no_flip"]]
-        dominant_alt_ratios = [r["dominant_alt_ratio"] for r in direction_results if not r["no_flip"]]
-        oscillation_scores = [r["oscillation_score"] for r in direction_results if not r["no_flip"]]
-        stable_after_first_vals = [r["stable_after_first"] for r in direction_results if not r["no_flip"]]
+        target_labels_path = []
+        shadow_labels_paths = [[] for _ in self.shadow_models]
 
-        mean_first_flip_radius = float(np.mean(flip_radii)) if len(flip_radii) > 0 else max_radius
-        min_first_flip_radius = float(np.min(flip_radii)) if len(flip_radii) > 0 else max_radius
-        std_first_flip_radius = float(np.std(flip_radii)) if len(flip_radii) > 1 else 0.0
+        for r in radius_schedule:
+            z = x + r * direction
+            z = torch.clamp(z, min=self.clamp_min, max=self.clamp_max)
 
-        mean_persistence = float(np.mean(persistences)) if len(persistences) > 0 else 0.0
-        mean_flip_count_ratio = float(np.mean(flip_count_ratios)) if len(flip_count_ratios) > 0 else 0.0
-        mean_dominant_alt_ratio = float(np.mean(dominant_alt_ratios)) if len(dominant_alt_ratios) > 0 else 0.0
-        mean_oscillation_score = float(np.mean(oscillation_scores)) if len(oscillation_scores) > 0 else 0.0
-        mean_stable_after_first = float(np.mean(stable_after_first_vals)) if len(stable_after_first_vals) > 0 else 0.0
+            target_pred = self.get_hard_label(self.model, z, is_target=True)
+            target_labels_path.append(int(target_pred))
 
-        first_flip_norm = float(mean_first_flip_radius / max_radius) if max_radius > 0 else 1.0
-        min_flip_norm = float(min_first_flip_radius / max_radius) if max_radius > 0 else 1.0
-        early_flip_score = float(1.0 - first_flip_norm) if max_radius > 0 else 0.0
-        flip_spread_ratio = float(std_first_flip_radius / max_radius) if max_radius > 0 else 0.0
+            for j, sm in enumerate(self.shadow_models):
+                shadow_pred = self.get_hard_label(sm, z, is_target=False)
+                shadow_labels_paths[j].append(int(shadow_pred))
+
+        target_stats = self._extract_path_stats_from_labels(
+            labels_along_path=target_labels_path,
+            clean_label=target_clean,
+            radius_schedule=radius_schedule,
+        )
+
+        shadow_stats = []
+        for j in range(len(self.shadow_models)):
+            shadow_stats.append(
+                self._extract_path_stats_from_labels(
+                    labels_along_path=shadow_labels_paths[j],
+                    clean_label=shadow_clean_labels[j],
+                    radius_schedule=radius_schedule,
+                )
+            )
+
+        disagreement_path = []
+        alt_disagreement_path = []
+
+        for i in range(len(radius_schedule)):
+            shadow_preds_i = [shadow_labels_paths[j][i] for j in range(len(self.shadow_models))]
+            if len(shadow_preds_i) == 0:
+                disagreement_path.append(0.0)
+                alt_disagreement_path.append(0.0)
+                continue
+
+            disagree = np.mean([int(p != target_labels_path[i]) for p in shadow_preds_i])
+            disagreement_path.append(float(disagree))
+
+            target_changed = int(target_labels_path[i] != target_clean)
+            if target_changed == 0:
+                alt_disagreement_path.append(0.0)
+            else:
+                alt_dis = np.mean([int(p != target_labels_path[i]) for p in shadow_preds_i])
+                alt_disagreement_path.append(float(alt_dis))
+
+        # compare target stats with shadow stats
+        shadow_first_flip = []
+        shadow_persistence = []
+        shadow_flip_density = []
+        shadow_alt_consistency = []
+        shadow_stability_after_first = []
+        shadow_oscillation = []
+
+        for s in shadow_stats:
+            ff = s["first_flip_radius"] if s["first_flip_radius"] is not None else self.radius_max
+            shadow_first_flip.append(float(ff))
+            shadow_persistence.append(float(s["persistence_after_flip"]))
+            shadow_flip_density.append(float(s["flip_count_ratio"]))
+            shadow_alt_consistency.append(float(s["dominant_alt_ratio"]))
+            shadow_stability_after_first.append(float(s["stable_after_first"]))
+            shadow_oscillation.append(float(s["oscillation_score"]))
+
+        target_ff = target_stats["first_flip_radius"] if target_stats["first_flip_radius"] is not None else self.radius_max
+        target_persistence = float(target_stats["persistence_after_flip"])
+        target_flip_density = float(target_stats["flip_count_ratio"])
+        target_alt_consistency = float(target_stats["dominant_alt_ratio"])
+        target_stability_after_first = float(target_stats["stable_after_first"])
+        target_oscillation = float(target_stats["oscillation_score"])
 
         return {
-            "flip_fraction": flip_fraction,
-            "no_flip_fraction": no_flip_fraction,
-            "mean_first_flip_radius": mean_first_flip_radius,
-            "min_first_flip_radius": min_first_flip_radius,
-            "std_first_flip_radius": std_first_flip_radius,
-            "first_flip_norm": first_flip_norm,
-            "min_flip_norm": min_flip_norm,
-            "mean_persistence": mean_persistence,
-            "mean_flip_count_ratio": mean_flip_count_ratio,
-            "mean_dominant_alt_ratio": mean_dominant_alt_ratio,
-            "mean_oscillation_score": mean_oscillation_score,
-            "mean_stable_after_first": mean_stable_after_first,
-            "early_flip_score": early_flip_score,
-            "flip_spread_ratio": flip_spread_ratio,
+            "target_clean_label": int(target_clean),
+            "shadow_clean_labels": [int(v) for v in shadow_clean_labels],
+            "target_labels_path": target_labels_path,
+            "shadow_labels_paths": shadow_labels_paths,
+            "target_stats": target_stats,
+            "shadow_stats": shadow_stats,
+            "mean_disagreement": float(np.mean(disagreement_path)) if len(disagreement_path) > 0 else 0.0,
+            "max_disagreement": float(np.max(disagreement_path)) if len(disagreement_path) > 0 else 0.0,
+            "mean_alt_disagreement": float(np.mean(alt_disagreement_path)) if len(alt_disagreement_path) > 0 else 0.0,
+            "target_minus_shadow_first_flip": float(target_ff - np.mean(shadow_first_flip)) if len(shadow_first_flip) > 0 else 0.0,
+            "target_minus_shadow_persistence": float(target_persistence - np.mean(shadow_persistence)) if len(shadow_persistence) > 0 else 0.0,
+            "target_minus_shadow_flip_density": float(target_flip_density - np.mean(shadow_flip_density)) if len(shadow_flip_density) > 0 else 0.0,
+            "target_minus_shadow_alt_consistency": float(target_alt_consistency - np.mean(shadow_alt_consistency)) if len(shadow_alt_consistency) > 0 else 0.0,
+            "target_minus_shadow_stability_after_first": float(target_stability_after_first - np.mean(shadow_stability_after_first)) if len(shadow_stability_after_first) > 0 else 0.0,
+            "target_minus_shadow_oscillation": float(target_oscillation - np.mean(shadow_oscillation)) if len(shadow_oscillation) > 0 else 0.0,
+            "target_first_flip_radius": float(target_ff),
+            "shadow_mean_first_flip_radius": float(np.mean(shadow_first_flip)) if len(shadow_first_flip) > 0 else self.radius_max,
+            "target_persistence": float(target_persistence),
+            "shadow_mean_persistence": float(np.mean(shadow_persistence)) if len(shadow_persistence) > 0 else 0.0,
+            "target_flip_density": float(target_flip_density),
+            "shadow_mean_flip_density": float(np.mean(shadow_flip_density)) if len(shadow_flip_density) > 0 else 0.0,
         }
 
-    def _shadow_reference_stats(self, shadow_aggs: List[Dict[str, float]]) -> Dict[str, Dict[str, float]]:
-        keys = [
-            "flip_fraction",
-            "no_flip_fraction",
-            "early_flip_score",
-            "mean_persistence",
-            "mean_flip_count_ratio",
-            "mean_dominant_alt_ratio",
-            "mean_oscillation_score",
-            "mean_stable_after_first",
-            "first_flip_norm",
-            "min_flip_norm",
-            "flip_spread_ratio",
-        ]
-
-        ref = {}
-        for key in keys:
-            vals = [float(a[key]) for a in shadow_aggs]
-            ref[key] = {
-                "mean": float(np.mean(vals)) if len(vals) > 0 else 0.0,
-                "std": float(np.std(vals)) if len(vals) > 1 else self.eps_std,
-            }
-            if ref[key]["std"] < self.eps_std:
-                ref[key]["std"] = self.eps_std
-        return ref
-
-    def _clip_z(self, z: float) -> float:
+    def _z(self, value: float, values: List[float]) -> float:
+        if len(values) == 0:
+            return 0.0
+        mu = float(np.mean(values))
+        sigma = float(np.std(values))
+        if sigma < self.eps:
+            sigma = 1.0
+        z = (float(value) - mu) / sigma
         return float(np.clip(z, -self.max_abs_z, self.max_abs_z))
 
-    def build_feature_vector(self, target_agg: Dict[str, float], shadow_ref: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-        def z(key):
-            return self._clip_z((target_agg[key] - shadow_ref[key]["mean"]) / shadow_ref[key]["std"])
-
-        features = {
-            "raw_flip_fraction": float(target_agg["flip_fraction"]),
-            "raw_no_flip_fraction": float(target_agg["no_flip_fraction"]),
-            "raw_early_flip_score": float(target_agg["early_flip_score"]),
-            "raw_persistence": float(target_agg["mean_persistence"]),
-            "raw_flip_density": float(target_agg["mean_flip_count_ratio"]),
-            "raw_alt_consistency": float(target_agg["mean_dominant_alt_ratio"]),
-            "raw_oscillation": float(target_agg["mean_oscillation_score"]),
-            "raw_stability_after_flip": float(target_agg["mean_stable_after_first"]),
-            "raw_first_flip_norm": float(target_agg["first_flip_norm"]),
-            "raw_min_flip_norm": float(target_agg["min_flip_norm"]),
-            "raw_flip_spread": float(target_agg["flip_spread_ratio"]),
-
-            "rel_flip_fraction_z": z("flip_fraction"),
-            "rel_no_flip_fraction_z": z("no_flip_fraction"),
-            "rel_early_flip_z": z("early_flip_score"),
-            "rel_persistence_z": z("mean_persistence"),
-            "rel_flip_density_z": z("mean_flip_count_ratio"),
-            "rel_alt_consistency_z": z("mean_dominant_alt_ratio"),
-            "rel_oscillation_z": z("mean_oscillation_score"),
-            "rel_stability_after_flip_z": z("mean_stable_after_first"),
-            "rel_first_flip_norm_z": z("first_flip_norm"),
-            "rel_min_flip_norm_z": z("min_flip_norm"),
-            "rel_flip_spread_z": z("flip_spread_ratio"),
-        }
-        return features
-
-    def compute_binary_score(self, feat: Dict[str, float]) -> float:
-        """
-        Centered score.
-        Positive score should more often indicate "more unlearn-like",
-        but evaluator still checks both polarities automatically.
-        """
-        score = (
-            0.30 * feat["rel_flip_fraction_z"] +
-            0.22 * feat["rel_early_flip_z"] +
-            0.18 * feat["rel_persistence_z"] +
-            0.12 * feat["rel_stability_after_flip_z"] +
-            0.10 * feat["rel_flip_density_z"] +
-            0.06 * feat["rel_alt_consistency_z"] -
-            0.10 * feat["rel_oscillation_z"] -
-            0.08 * feat["rel_no_flip_fraction_z"] -
-            0.14 * feat["rel_first_flip_norm_z"] -
-            0.08 * feat["rel_min_flip_norm_z"] -
-            0.04 * feat["rel_flip_spread_z"] +
-            0.04 * feat["raw_flip_fraction"] -
-            0.03 * feat["raw_no_flip_fraction"]
-        )
-        return float(score)
-
-    def classify_binary(self, score: float) -> int:
-        return int(score >= self.decision_threshold)
-
-    def _run_directional_probe_set(self, model, x, is_target: bool) -> Dict[str, Any]:
-        clean_label = self.get_hard_label(model, x, is_target=is_target)
+    def score_sample(self, x: torch.Tensor, y: int) -> Dict[str, Any]:
         radius_schedule = self.build_radius_schedule()
-
         directions = [self.random_unit_direction(x) for _ in range(self.num_directions)]
+
         direction_results = []
         for d in directions:
-            res = self.probe_direction_for_model(
-                model=model,
-                x=x,
-                clean_label=clean_label,
-                direction=d,
-                radius_schedule=radius_schedule,
-                is_target=is_target,
+            direction_results.append(
+                self._probe_target_and_shadows_single_direction(
+                    x=x,
+                    direction=d,
+                    radius_schedule=radius_schedule,
+                )
             )
-            direction_results.append(res)
 
-        agg = self.aggregate_directional_features(direction_results, radius_schedule)
-        return {
-            "clean_label": int(clean_label),
-            "radius_schedule": [float(r) for r in radius_schedule],
-            "direction_results": direction_results,
-            "agg": agg,
+        mean_disagreement_vals = [r["mean_disagreement"] for r in direction_results]
+        max_disagreement_vals = [r["max_disagreement"] for r in direction_results]
+        mean_alt_disagreement_vals = [r["mean_alt_disagreement"] for r in direction_results]
+
+        delta_ff_vals = [r["target_minus_shadow_first_flip"] for r in direction_results]
+        delta_persistence_vals = [r["target_minus_shadow_persistence"] for r in direction_results]
+        delta_flip_density_vals = [r["target_minus_shadow_flip_density"] for r in direction_results]
+        delta_alt_consistency_vals = [r["target_minus_shadow_alt_consistency"] for r in direction_results]
+        delta_stability_vals = [r["target_minus_shadow_stability_after_first"] for r in direction_results]
+        delta_oscillation_vals = [r["target_minus_shadow_oscillation"] for r in direction_results]
+
+        # raw aggregated features
+        feat = {
+            "mean_disagreement": float(np.mean(mean_disagreement_vals)),
+            "max_disagreement": float(np.mean(max_disagreement_vals)),
+            "mean_alt_disagreement": float(np.mean(mean_alt_disagreement_vals)),
+            "mean_delta_first_flip": float(np.mean(delta_ff_vals)),
+            "mean_delta_persistence": float(np.mean(delta_persistence_vals)),
+            "mean_delta_flip_density": float(np.mean(delta_flip_density_vals)),
+            "mean_delta_alt_consistency": float(np.mean(delta_alt_consistency_vals)),
+            "mean_delta_stability_after_first": float(np.mean(delta_stability_vals)),
+            "mean_delta_oscillation": float(np.mean(delta_oscillation_vals)),
         }
 
-    def score_sample(self, x: torch.Tensor, y: int) -> Dict[str, Any]:
-        target_probe = self._run_directional_probe_set(self.model, x, is_target=True)
-        target_agg = target_probe["agg"]
+        # centered direction-wise abnormalities
+        feat["z_mean_disagreement"] = self._z(feat["mean_disagreement"], mean_disagreement_vals)
+        feat["z_max_disagreement"] = self._z(feat["max_disagreement"], max_disagreement_vals)
+        feat["z_mean_alt_disagreement"] = self._z(feat["mean_alt_disagreement"], mean_alt_disagreement_vals)
+        feat["z_mean_delta_first_flip"] = self._z(feat["mean_delta_first_flip"], delta_ff_vals)
+        feat["z_mean_delta_persistence"] = self._z(feat["mean_delta_persistence"], delta_persistence_vals)
+        feat["z_mean_delta_flip_density"] = self._z(feat["mean_delta_flip_density"], delta_flip_density_vals)
+        feat["z_mean_delta_alt_consistency"] = self._z(feat["mean_delta_alt_consistency"], delta_alt_consistency_vals)
+        feat["z_mean_delta_stability_after_first"] = self._z(feat["mean_delta_stability_after_first"], delta_stability_vals)
+        feat["z_mean_delta_oscillation"] = self._z(feat["mean_delta_oscillation"], delta_oscillation_vals)
 
-        shadow_aggs = []
-        shadow_clean_labels = []
+        # IMPORTANT:
+        # target flipping EARLIER than shadows => delta_first_flip negative
+        # so we use minus sign on that term
+        iris_score = (
+            0.28 * feat["mean_disagreement"] +
+            0.18 * feat["max_disagreement"] +
+            0.18 * feat["mean_alt_disagreement"] -
+            0.16 * feat["mean_delta_first_flip"] +
+            0.10 * feat["mean_delta_persistence"] +
+            0.10 * feat["mean_delta_flip_density"] +
+            0.08 * feat["mean_delta_alt_consistency"] +
+            0.08 * feat["mean_delta_stability_after_first"] -
+            0.06 * feat["mean_delta_oscillation"]
+        )
 
-        for sm in self.shadow_models:
-            shadow_probe = self._run_directional_probe_set(sm, x, is_target=False)
-            shadow_aggs.append(shadow_probe["agg"])
-            shadow_clean_labels.append(int(shadow_probe["clean_label"]))
-
-        if len(shadow_aggs) == 0:
-            # fallback if no shadow models are available
-            shadow_ref = {
-                key: {"mean": float(target_agg[key]), "std": 1.0}
-                for key in [
-                    "flip_fraction",
-                    "no_flip_fraction",
-                    "early_flip_score",
-                    "mean_persistence",
-                    "mean_flip_count_ratio",
-                    "mean_dominant_alt_ratio",
-                    "mean_oscillation_score",
-                    "mean_stable_after_first",
-                    "first_flip_norm",
-                    "min_flip_norm",
-                    "flip_spread_ratio",
-                ]
-            }
-        else:
-            shadow_ref = self._shadow_reference_stats(shadow_aggs)
-
-        feat = self.build_feature_vector(target_agg=target_agg, shadow_ref=shadow_ref)
-        iris_score = self.compute_binary_score(feat)
-        pred_binary = self.classify_binary(iris_score)
+        pred_binary = int(iris_score >= self.decision_threshold)
 
         out = {
             "target_label": int(y),
-            "pred_clean": int(target_probe["clean_label"]),
-            "radius_schedule": target_probe["radius_schedule"],
+            "pred_clean": int(direction_results[0]["target_clean_label"]) if len(direction_results) > 0 else int(y),
+            "radius_schedule": [float(r) for r in radius_schedule],
             "num_shadow_models_used": int(len(self.shadow_models)),
-            "shadow_clean_label_mean": float(np.mean(shadow_clean_labels)) if len(shadow_clean_labels) > 0 else 0.0,
-            "shadow_clean_label_std": float(np.std(shadow_clean_labels)) if len(shadow_clean_labels) > 0 else 0.0,
-            **target_agg,
+            "num_directions_used": int(self.num_directions),
             **feat,
             "iris_score": float(iris_score),
             "binary_pred": int(pred_binary),
         }
-
-        # add compact shadow reference diagnostics
-        for k, stats in shadow_ref.items():
-            out[f"shadow_mean__{k}"] = float(stats["mean"])
-            out[f"shadow_std__{k}"] = float(stats["std"])
 
         return out
 
