@@ -81,7 +81,7 @@ def main():
     parser.add_argument('--iris_radius_min', type=float, default=0.02)
     parser.add_argument('--iris_radius_max', type=float, default=0.30)
     parser.add_argument('--iris_radius_steps', type=int, default=8)
-    parser.add_argument('--iris_binary_threshold', type=float, default=0.50)
+    parser.add_argument('--iris_binary_threshold', type=float, default=0.0)
     parser.add_argument('--debug',                      action="store_true")
 
     parser.add_argument('--seed',           type=int,   default=42,         help='random seed (default: 42)')
@@ -142,6 +142,7 @@ def main():
     if args.atk == "IRIS_binary_directional":
         iris_attack = IRISBinaryDirectional(
             model=target_model,
+            shadow_models=shadow_models,
             args=args,
             device=DEVICE,
         )
@@ -183,14 +184,20 @@ def main():
             best_metrics=eval_results["best_metrics"],
         )
 
-        save_text(report_text, paths["report_path"])
-
-        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
-
         report_text += "\n\nBinary evaluation:\n"
         report_text += f"auc_unlearn_vs_nonunlearn = {eval_results['auc_unlearn_vs_nonunlearn']}\n"
+        report_text += f"auc_raw_score = {eval_results['auc_raw_score']}\n"
+        report_text += f"auc_negated_score = {eval_results['auc_negated_score']}\n"
+        report_text += f"selected_score_orientation = {eval_results['selected_score_orientation']}\n"
         report_text += f"num_unlearn = {eval_results['num_unlearn']}\n"
         report_text += f"num_nonunlearn = {eval_results['num_nonunlearn']}\n"
+
+        if "score_stats" in eval_results:
+            report_text += "\nScore stats:\n"
+            for outer_k, outer_v in eval_results["score_stats"].items():
+                report_text += f"{outer_k} = {outer_v}\n"
+
+        sanity_results = run_basic_iris_sanity_checks(summary=summary, paths=paths)
 
         report_text += "\nSanity checks:\n"
         report_text += f"passed = {sanity_results['passed']}\n"
@@ -228,6 +235,9 @@ def main():
         for k, v in eval_results["best_metrics"].items():
             print(f"  {k}: {v}")
         print(f"AUC unlearn vs non-unlearn: {eval_results['auc_unlearn_vs_nonunlearn']}")
+        print(f"AUC raw score: {eval_results['auc_raw_score']}")
+        print(f"AUC negated score: {eval_results['auc_negated_score']}")
+        print(f"Selected score orientation: {eval_results['selected_score_orientation']}")
         print("Query summary:")
         print(iris_attack.get_query_audit_summary())
         print("Sanity:")
