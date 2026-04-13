@@ -83,7 +83,11 @@ def main():
     parser.add_argument('--iris_radius_steps', type=int, default=8)
     parser.add_argument('--iris_binary_threshold', type=float, default=0.0)
     parser.add_argument('--debug',                      action="store_true")
-
+    parser.add_argument('--iris_use_adaptive_refine', action='store_true')
+    parser.add_argument('--iris_stage1_num_directions', type=int, default=4)
+    parser.add_argument('--iris_stage1_radius_steps', type=int, default=4)
+    parser.add_argument('--iris_base_num_shadow', type=int, default=2)
+    parser.add_argument('--iris_refine_margin', type=float, default=0.08)
     parser.add_argument('--seed',           type=int,   default=42,         help='random seed (default: 42)')
     args = parser.parse_args()
 

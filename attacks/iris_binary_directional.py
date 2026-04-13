@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import torch
@@ -10,18 +10,13 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class IRISBinaryDirectional:
     """
-    IRIS binary attack - disagreement based version
+    IRIS binary attack - adaptive low-query disagreement version
 
-    Goal:
-    - more Apollo-like than pure local instability
-    - still lower-query than Apollo
-    - binary task:
-        positive = unlearn
-        negative = retain + test
-
-    Key idea:
-    score a sample by how abnormal the target model's directional behavior is
-    relative to the shadow ensemble.
+    Goals:
+    - lower query cost than Apollo
+    - no optimizer loop
+    - stronger shadow-relative features than previous IRIS variants
+    - optional adaptive refinement only for ambiguous samples
     """
 
     def __init__(self, model, shadow_models, args, device=None):
@@ -30,16 +25,21 @@ class IRISBinaryDirectional:
         self.args = args
         self.device = device if device is not None else DEVICE
 
-        self.num_directions = int(getattr(args, "iris_num_directions", 8))
+        self.num_directions = int(getattr(args, "iris_num_directions", 6))
         self.radius_min = float(getattr(args, "iris_radius_min", 0.02))
-        self.radius_max = float(getattr(args, "iris_radius_max", 0.30))
-        self.radius_steps = int(getattr(args, "iris_radius_steps", 8))
+        self.radius_max = float(getattr(args, "iris_radius_max", 0.24))
+        self.radius_steps = int(getattr(args, "iris_radius_steps", 6))
         self.decision_threshold = float(getattr(args, "iris_binary_threshold", 0.0))
+
+        self.use_adaptive_refine = bool(getattr(args, "iris_use_adaptive_refine", False))
+        self.stage1_num_directions = int(getattr(args, "iris_stage1_num_directions", 4))
+        self.stage1_radius_steps = int(getattr(args, "iris_stage1_radius_steps", 4))
+        self.base_num_shadow = int(getattr(args, "iris_base_num_shadow", 2))
+        self.refine_margin = float(getattr(args, "iris_refine_margin", 0.08))
 
         self.clamp_min = 0.0
         self.clamp_max = 1.0
         self.eps = 1e-8
-        self.max_abs_z = 5.0
 
         self.model.eval()
         for m in self.shadow_models:
@@ -82,10 +82,11 @@ class IRISBinaryDirectional:
         pred = torch.argmax(logits, dim=1).item()
         return int(pred)
 
-    def build_radius_schedule(self) -> List[float]:
-        if self.radius_steps <= 1:
+    def build_radius_schedule(self, steps: int = None) -> List[float]:
+        n_steps = int(self.radius_steps if steps is None else steps)
+        if n_steps <= 1:
             return [self.radius_max]
-        return np.linspace(self.radius_min, self.radius_max, self.radius_steps).tolist()
+        return np.linspace(self.radius_min, self.radius_max, n_steps).tolist()
 
     def random_unit_direction(self, x: torch.Tensor) -> torch.Tensor:
         d = torch.randn_like(x)
@@ -94,7 +95,12 @@ class IRISBinaryDirectional:
             return self.random_unit_direction(x)
         return d / norm
 
-    def _extract_path_stats_from_labels(self, labels_along_path: List[int], clean_label: int, radius_schedule: List[float]) -> Dict[str, Any]:
+    def _extract_path_stats_from_labels(
+        self,
+        labels_along_path: List[int],
+        clean_label: int,
+        radius_schedule: List[float],
+    ) -> Dict[str, Any]:
         flip_positions = []
         alt_labels = []
 
@@ -158,20 +164,32 @@ class IRISBinaryDirectional:
             "stable_after_first": float(stable_after_first),
         }
 
-    def _probe_target_and_shadows_single_direction(
+    def _split_radius_bands(self, values: List[float]) -> Tuple[float, float, float]:
+        if len(values) == 0:
+            return 0.0, 0.0, 0.0
+        n = len(values)
+        a = max(1, n // 3)
+        b = max(a + 1, (2 * n) // 3)
+        early = float(np.mean(values[:a])) if a > 0 else 0.0
+        mid = float(np.mean(values[a:b])) if b > a else early
+        late = float(np.mean(values[b:])) if n > b else mid
+        return early, mid, late
+
+    def _probe_with_subset(
         self,
         x: torch.Tensor,
         direction: torch.Tensor,
         radius_schedule: List[float],
+        shadow_subset: List[int],
     ) -> Dict[str, Any]:
         target_clean = self.get_hard_label(self.model, x, is_target=True)
 
         shadow_clean_labels = []
-        for sm in self.shadow_models:
-            shadow_clean_labels.append(self.get_hard_label(sm, x, is_target=False))
+        for j in shadow_subset:
+            shadow_clean_labels.append(self.get_hard_label(self.shadow_models[j], x, is_target=False))
 
         target_labels_path = []
-        shadow_labels_paths = [[] for _ in self.shadow_models]
+        shadow_labels_paths = [[] for _ in shadow_subset]
 
         for r in radius_schedule:
             z = x + r * direction
@@ -180,9 +198,9 @@ class IRISBinaryDirectional:
             target_pred = self.get_hard_label(self.model, z, is_target=True)
             target_labels_path.append(int(target_pred))
 
-            for j, sm in enumerate(self.shadow_models):
-                shadow_pred = self.get_hard_label(sm, z, is_target=False)
-                shadow_labels_paths[j].append(int(shadow_pred))
+            for loc, j in enumerate(shadow_subset):
+                shadow_pred = self.get_hard_label(self.shadow_models[j], z, is_target=False)
+                shadow_labels_paths[loc].append(int(shadow_pred))
 
         target_stats = self._extract_path_stats_from_labels(
             labels_along_path=target_labels_path,
@@ -191,166 +209,232 @@ class IRISBinaryDirectional:
         )
 
         shadow_stats = []
-        for j in range(len(self.shadow_models)):
+        for loc in range(len(shadow_subset)):
             shadow_stats.append(
                 self._extract_path_stats_from_labels(
-                    labels_along_path=shadow_labels_paths[j],
-                    clean_label=shadow_clean_labels[j],
+                    labels_along_path=shadow_labels_paths[loc],
+                    clean_label=shadow_clean_labels[loc],
                     radius_schedule=radius_schedule,
                 )
             )
 
         disagreement_path = []
         alt_disagreement_path = []
+        target_flip_while_shadow_majority_not = []
+        target_alt_mismatch_vs_shadow_majority = []
 
         for i in range(len(radius_schedule)):
-            shadow_preds_i = [shadow_labels_paths[j][i] for j in range(len(self.shadow_models))]
+            shadow_preds_i = [shadow_labels_paths[loc][i] for loc in range(len(shadow_subset))]
             if len(shadow_preds_i) == 0:
                 disagreement_path.append(0.0)
                 alt_disagreement_path.append(0.0)
+                target_flip_while_shadow_majority_not.append(0.0)
+                target_alt_mismatch_vs_shadow_majority.append(0.0)
                 continue
 
             disagree = np.mean([int(p != target_labels_path[i]) for p in shadow_preds_i])
             disagreement_path.append(float(disagree))
 
+            shadow_majority_not_clean = np.mean([int(p != shadow_clean_labels[loc]) for loc, p in enumerate(shadow_preds_i)])
             target_changed = int(target_labels_path[i] != target_clean)
+
+            if target_changed == 1 and shadow_majority_not_clean < 0.5:
+                target_flip_while_shadow_majority_not.append(1.0)
+            else:
+                target_flip_while_shadow_majority_not.append(0.0)
+
             if target_changed == 0:
                 alt_disagreement_path.append(0.0)
+                target_alt_mismatch_vs_shadow_majority.append(0.0)
             else:
                 alt_dis = np.mean([int(p != target_labels_path[i]) for p in shadow_preds_i])
                 alt_disagreement_path.append(float(alt_dis))
 
-        # compare target stats with shadow stats
-        shadow_first_flip = []
-        shadow_persistence = []
-        shadow_flip_density = []
-        shadow_alt_consistency = []
-        shadow_stability_after_first = []
-        shadow_oscillation = []
-
-        for s in shadow_stats:
-            ff = s["first_flip_radius"] if s["first_flip_radius"] is not None else self.radius_max
-            shadow_first_flip.append(float(ff))
-            shadow_persistence.append(float(s["persistence_after_flip"]))
-            shadow_flip_density.append(float(s["flip_count_ratio"]))
-            shadow_alt_consistency.append(float(s["dominant_alt_ratio"]))
-            shadow_stability_after_first.append(float(s["stable_after_first"]))
-            shadow_oscillation.append(float(s["oscillation_score"]))
+                vals, counts = np.unique(np.array(shadow_preds_i), return_counts=True)
+                shadow_majority_label = int(vals[np.argmax(counts)])
+                target_alt_mismatch_vs_shadow_majority.append(float(int(target_labels_path[i] != shadow_majority_label)))
 
         target_ff = target_stats["first_flip_radius"] if target_stats["first_flip_radius"] is not None else self.radius_max
-        target_persistence = float(target_stats["persistence_after_flip"])
-        target_flip_density = float(target_stats["flip_count_ratio"])
-        target_alt_consistency = float(target_stats["dominant_alt_ratio"])
-        target_stability_after_first = float(target_stats["stable_after_first"])
-        target_oscillation = float(target_stats["oscillation_score"])
+        shadow_ffs = []
+        shadow_persistences = []
+        shadow_flip_densities = []
+        shadow_alt_consistencies = []
+        shadow_oscillations = []
+        shadow_stabilities = []
+
+        for s in shadow_stats:
+            shadow_ffs.append(float(s["first_flip_radius"] if s["first_flip_radius"] is not None else self.radius_max))
+            shadow_persistences.append(float(s["persistence_after_flip"]))
+            shadow_flip_densities.append(float(s["flip_count_ratio"]))
+            shadow_alt_consistencies.append(float(s["dominant_alt_ratio"]))
+            shadow_oscillations.append(float(s["oscillation_score"]))
+            shadow_stabilities.append(float(s["stable_after_first"]))
+
+        mean_shadow_ff = float(np.mean(shadow_ffs)) if len(shadow_ffs) > 0 else self.radius_max
+
+        early_dis, mid_dis, late_dis = self._split_radius_bands(disagreement_path)
+        early_alt_dis, mid_alt_dis, late_alt_dis = self._split_radius_bands(alt_disagreement_path)
 
         return {
             "target_clean_label": int(target_clean),
-            "shadow_clean_labels": [int(v) for v in shadow_clean_labels],
-            "target_labels_path": target_labels_path,
-            "shadow_labels_paths": shadow_labels_paths,
             "target_stats": target_stats,
-            "shadow_stats": shadow_stats,
             "mean_disagreement": float(np.mean(disagreement_path)) if len(disagreement_path) > 0 else 0.0,
             "max_disagreement": float(np.max(disagreement_path)) if len(disagreement_path) > 0 else 0.0,
+            "early_disagreement": early_dis,
+            "mid_disagreement": mid_dis,
+            "late_disagreement": late_dis,
             "mean_alt_disagreement": float(np.mean(alt_disagreement_path)) if len(alt_disagreement_path) > 0 else 0.0,
-            "target_minus_shadow_first_flip": float(target_ff - np.mean(shadow_first_flip)) if len(shadow_first_flip) > 0 else 0.0,
-            "target_minus_shadow_persistence": float(target_persistence - np.mean(shadow_persistence)) if len(shadow_persistence) > 0 else 0.0,
-            "target_minus_shadow_flip_density": float(target_flip_density - np.mean(shadow_flip_density)) if len(shadow_flip_density) > 0 else 0.0,
-            "target_minus_shadow_alt_consistency": float(target_alt_consistency - np.mean(shadow_alt_consistency)) if len(shadow_alt_consistency) > 0 else 0.0,
-            "target_minus_shadow_stability_after_first": float(target_stability_after_first - np.mean(shadow_stability_after_first)) if len(shadow_stability_after_first) > 0 else 0.0,
-            "target_minus_shadow_oscillation": float(target_oscillation - np.mean(shadow_oscillation)) if len(shadow_oscillation) > 0 else 0.0,
-            "target_first_flip_radius": float(target_ff),
-            "shadow_mean_first_flip_radius": float(np.mean(shadow_first_flip)) if len(shadow_first_flip) > 0 else self.radius_max,
-            "target_persistence": float(target_persistence),
-            "shadow_mean_persistence": float(np.mean(shadow_persistence)) if len(shadow_persistence) > 0 else 0.0,
-            "target_flip_density": float(target_flip_density),
-            "shadow_mean_flip_density": float(np.mean(shadow_flip_density)) if len(shadow_flip_density) > 0 else 0.0,
+            "early_alt_disagreement": early_alt_dis,
+            "mid_alt_disagreement": mid_alt_dis,
+            "late_alt_disagreement": late_alt_dis,
+            "target_flip_while_shadow_majority_not": float(np.mean(target_flip_while_shadow_majority_not)) if len(target_flip_while_shadow_majority_not) > 0 else 0.0,
+            "target_alt_mismatch_vs_shadow_majority": float(np.mean(target_alt_mismatch_vs_shadow_majority)) if len(target_alt_mismatch_vs_shadow_majority) > 0 else 0.0,
+            "target_minus_shadow_first_flip": float(target_ff - mean_shadow_ff),
+            "target_minus_shadow_persistence": float(target_stats["persistence_after_flip"] - (np.mean(shadow_persistences) if len(shadow_persistences) > 0 else 0.0)),
+            "target_minus_shadow_flip_density": float(target_stats["flip_count_ratio"] - (np.mean(shadow_flip_densities) if len(shadow_flip_densities) > 0 else 0.0)),
+            "target_minus_shadow_alt_consistency": float(target_stats["dominant_alt_ratio"] - (np.mean(shadow_alt_consistencies) if len(shadow_alt_consistencies) > 0 else 0.0)),
+            "target_minus_shadow_oscillation": float(target_stats["oscillation_score"] - (np.mean(shadow_oscillations) if len(shadow_oscillations) > 0 else 0.0)),
+            "target_minus_shadow_stability_after_first": float(target_stats["stable_after_first"] - (np.mean(shadow_stabilities) if len(shadow_stabilities) > 0 else 0.0)),
         }
 
-    def _z(self, value: float, values: List[float]) -> float:
-        if len(values) == 0:
-            return 0.0
-        mu = float(np.mean(values))
-        sigma = float(np.std(values))
-        if sigma < self.eps:
-            sigma = 1.0
-        z = (float(value) - mu) / sigma
-        return float(np.clip(z, -self.max_abs_z, self.max_abs_z))
+    def _aggregate_direction_results(self, direction_results: List[Dict[str, Any]]) -> Dict[str, float]:
+        if len(direction_results) == 0:
+            return {}
 
-    def score_sample(self, x: torch.Tensor, y: int) -> Dict[str, Any]:
-        radius_schedule = self.build_radius_schedule()
-        directions = [self.random_unit_direction(x) for _ in range(self.num_directions)]
+        def mean_of(key):
+            return float(np.mean([float(r[key]) for r in direction_results]))
 
+        def frac_of(predicate):
+            return float(np.mean([1.0 if predicate(r) else 0.0 for r in direction_results]))
+
+        feat = {
+            "mean_disagreement": mean_of("mean_disagreement"),
+            "max_disagreement": mean_of("max_disagreement"),
+            "early_disagreement": mean_of("early_disagreement"),
+            "mid_disagreement": mean_of("mid_disagreement"),
+            "late_disagreement": mean_of("late_disagreement"),
+
+            "mean_alt_disagreement": mean_of("mean_alt_disagreement"),
+            "early_alt_disagreement": mean_of("early_alt_disagreement"),
+            "mid_alt_disagreement": mean_of("mid_alt_disagreement"),
+            "late_alt_disagreement": mean_of("late_alt_disagreement"),
+
+            "target_flip_while_shadow_majority_not": mean_of("target_flip_while_shadow_majority_not"),
+            "target_alt_mismatch_vs_shadow_majority": mean_of("target_alt_mismatch_vs_shadow_majority"),
+
+            "mean_delta_first_flip": mean_of("target_minus_shadow_first_flip"),
+            "mean_delta_persistence": mean_of("target_minus_shadow_persistence"),
+            "mean_delta_flip_density": mean_of("target_minus_shadow_flip_density"),
+            "mean_delta_alt_consistency": mean_of("target_minus_shadow_alt_consistency"),
+            "mean_delta_oscillation": mean_of("target_minus_shadow_oscillation"),
+            "mean_delta_stability_after_first": mean_of("target_minus_shadow_stability_after_first"),
+
+            "frac_target_earlier_than_shadow": frac_of(lambda r: float(r["target_minus_shadow_first_flip"]) < 0.0),
+            "frac_target_more_persistent_than_shadow": frac_of(lambda r: float(r["target_minus_shadow_persistence"]) > 0.0),
+            "frac_target_denser_than_shadow": frac_of(lambda r: float(r["target_minus_shadow_flip_density"]) > 0.0),
+            "frac_target_more_alt_mismatch_than_shadow": frac_of(lambda r: float(r["target_alt_mismatch_vs_shadow_majority"]) > 0.0),
+        }
+
+        return feat
+
+    def _compute_score(self, feat: Dict[str, float]) -> float:
+        # Important sign:
+        # earlier target flip than shadow => mean_delta_first_flip negative => use minus sign
+        score = (
+            0.18 * feat["early_disagreement"] +
+            0.10 * feat["mid_disagreement"] +
+            0.04 * feat["late_disagreement"] +
+            0.12 * feat["early_alt_disagreement"] +
+            0.08 * feat["mid_alt_disagreement"] +
+            0.05 * feat["target_flip_while_shadow_majority_not"] +
+            0.06 * feat["target_alt_mismatch_vs_shadow_majority"] -
+            0.12 * feat["mean_delta_first_flip"] +
+            0.08 * feat["mean_delta_persistence"] +
+            0.07 * feat["mean_delta_flip_density"] +
+            0.05 * feat["mean_delta_alt_consistency"] +
+            0.04 * feat["mean_delta_stability_after_first"] -
+            0.04 * feat["mean_delta_oscillation"] +
+            0.05 * feat["frac_target_earlier_than_shadow"] +
+            0.03 * feat["frac_target_more_persistent_than_shadow"] +
+            0.02 * feat["frac_target_denser_than_shadow"] +
+            0.03 * feat["frac_target_more_alt_mismatch_than_shadow"]
+        )
+        return float(score)
+
+    def _run_probe_block(
+        self,
+        x: torch.Tensor,
+        num_directions: int,
+        radius_steps: int,
+        shadow_subset: List[int],
+    ) -> Tuple[List[Dict[str, Any]], List[float]]:
+        radius_schedule = self.build_radius_schedule(steps=radius_steps)
         direction_results = []
-        for d in directions:
+
+        for _ in range(num_directions):
+            d = self.random_unit_direction(x)
             direction_results.append(
-                self._probe_target_and_shadows_single_direction(
+                self._probe_with_subset(
                     x=x,
                     direction=d,
                     radius_schedule=radius_schedule,
+                    shadow_subset=shadow_subset,
                 )
             )
 
-        mean_disagreement_vals = [r["mean_disagreement"] for r in direction_results]
-        max_disagreement_vals = [r["max_disagreement"] for r in direction_results]
-        mean_alt_disagreement_vals = [r["mean_alt_disagreement"] for r in direction_results]
+        return direction_results, radius_schedule
 
-        delta_ff_vals = [r["target_minus_shadow_first_flip"] for r in direction_results]
-        delta_persistence_vals = [r["target_minus_shadow_persistence"] for r in direction_results]
-        delta_flip_density_vals = [r["target_minus_shadow_flip_density"] for r in direction_results]
-        delta_alt_consistency_vals = [r["target_minus_shadow_alt_consistency"] for r in direction_results]
-        delta_stability_vals = [r["target_minus_shadow_stability_after_first"] for r in direction_results]
-        delta_oscillation_vals = [r["target_minus_shadow_oscillation"] for r in direction_results]
+    def score_sample(self, x: torch.Tensor, y: int) -> Dict[str, Any]:
+        num_shadows_total = len(self.shadow_models)
+        base_num_shadow = min(self.base_num_shadow, num_shadows_total)
+        full_shadow_subset = list(range(num_shadows_total))
+        stage1_shadow_subset = list(range(base_num_shadow))
 
-        # raw aggregated features
-        feat = {
-            "mean_disagreement": float(np.mean(mean_disagreement_vals)),
-            "max_disagreement": float(np.mean(max_disagreement_vals)),
-            "mean_alt_disagreement": float(np.mean(mean_alt_disagreement_vals)),
-            "mean_delta_first_flip": float(np.mean(delta_ff_vals)),
-            "mean_delta_persistence": float(np.mean(delta_persistence_vals)),
-            "mean_delta_flip_density": float(np.mean(delta_flip_density_vals)),
-            "mean_delta_alt_consistency": float(np.mean(delta_alt_consistency_vals)),
-            "mean_delta_stability_after_first": float(np.mean(delta_stability_vals)),
-            "mean_delta_oscillation": float(np.mean(delta_oscillation_vals)),
-        }
-
-        # centered direction-wise abnormalities
-        feat["z_mean_disagreement"] = self._z(feat["mean_disagreement"], mean_disagreement_vals)
-        feat["z_max_disagreement"] = self._z(feat["max_disagreement"], max_disagreement_vals)
-        feat["z_mean_alt_disagreement"] = self._z(feat["mean_alt_disagreement"], mean_alt_disagreement_vals)
-        feat["z_mean_delta_first_flip"] = self._z(feat["mean_delta_first_flip"], delta_ff_vals)
-        feat["z_mean_delta_persistence"] = self._z(feat["mean_delta_persistence"], delta_persistence_vals)
-        feat["z_mean_delta_flip_density"] = self._z(feat["mean_delta_flip_density"], delta_flip_density_vals)
-        feat["z_mean_delta_alt_consistency"] = self._z(feat["mean_delta_alt_consistency"], delta_alt_consistency_vals)
-        feat["z_mean_delta_stability_after_first"] = self._z(feat["mean_delta_stability_after_first"], delta_stability_vals)
-        feat["z_mean_delta_oscillation"] = self._z(feat["mean_delta_oscillation"], delta_oscillation_vals)
-
-        # IMPORTANT:
-        # target flipping EARLIER than shadows => delta_first_flip negative
-        # so we use minus sign on that term
-        iris_score = (
-            0.28 * feat["mean_disagreement"] +
-            0.18 * feat["max_disagreement"] +
-            0.18 * feat["mean_alt_disagreement"] -
-            0.16 * feat["mean_delta_first_flip"] +
-            0.10 * feat["mean_delta_persistence"] +
-            0.10 * feat["mean_delta_flip_density"] +
-            0.08 * feat["mean_delta_alt_consistency"] +
-            0.08 * feat["mean_delta_stability_after_first"] -
-            0.06 * feat["mean_delta_oscillation"]
+        # Stage 1: cheap probe
+        stage1_results, stage1_radius_schedule = self._run_probe_block(
+            x=x,
+            num_directions=min(self.stage1_num_directions, self.num_directions),
+            radius_steps=min(self.stage1_radius_steps, self.radius_steps),
+            shadow_subset=stage1_shadow_subset,
         )
 
+        stage1_feat = self._aggregate_direction_results(stage1_results)
+        stage1_score = self._compute_score(stage1_feat)
+
+        refined = False
+        final_results = list(stage1_results)
+        final_radius_schedule = list(stage1_radius_schedule)
+        final_shadow_subset = list(stage1_shadow_subset)
+
+        # Optional adaptive refinement only for ambiguous samples
+        if self.use_adaptive_refine and abs(stage1_score) < self.refine_margin:
+            refined = True
+
+            extra_dirs = max(self.num_directions - len(stage1_results), 0)
+            if extra_dirs > 0:
+                refine_results, refine_radius_schedule = self._run_probe_block(
+                    x=x,
+                    num_directions=extra_dirs,
+                    radius_steps=self.radius_steps,
+                    shadow_subset=full_shadow_subset,
+                )
+                final_results.extend(refine_results)
+                final_radius_schedule = list(refine_radius_schedule)
+                final_shadow_subset = list(full_shadow_subset)
+
+        final_feat = self._aggregate_direction_results(final_results)
+        iris_score = self._compute_score(final_feat)
         pred_binary = int(iris_score >= self.decision_threshold)
 
         out = {
             "target_label": int(y),
-            "pred_clean": int(direction_results[0]["target_clean_label"]) if len(direction_results) > 0 else int(y),
-            "radius_schedule": [float(r) for r in radius_schedule],
-            "num_shadow_models_used": int(len(self.shadow_models)),
-            "num_directions_used": int(self.num_directions),
-            **feat,
+            "pred_clean": int(stage1_results[0]["target_clean_label"]) if len(stage1_results) > 0 else int(y),
+            "radius_schedule": [float(r) for r in final_radius_schedule],
+            "num_shadow_models_used": int(len(final_shadow_subset)),
+            "num_directions_used": int(len(final_results)),
+            "used_adaptive_refine": int(refined),
+            "stage1_score": float(stage1_score),
+            **final_feat,
             "iris_score": float(iris_score),
             "binary_pred": int(pred_binary),
         }
