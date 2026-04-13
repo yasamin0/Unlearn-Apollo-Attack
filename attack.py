@@ -88,6 +88,9 @@ def main():
     parser.add_argument('--iris_stage1_radius_steps', type=int, default=4)
     parser.add_argument('--iris_base_num_shadow', type=int, default=2)
     parser.add_argument('--iris_refine_margin', type=float, default=0.08)
+    parser.add_argument('--iris_shadow_train_pos_per_model', type=int, default=30)
+    parser.add_argument('--iris_shadow_train_neg_per_model', type=int, default=60)
+    parser.add_argument('--iris_attack_head_seed', type=int, default=42)
     parser.add_argument('--seed',           type=int,   default=42,         help='random seed (default: 42)')
     args = parser.parse_args()
 
@@ -147,10 +150,12 @@ def main():
         iris_attack = IRISBinaryDirectional(
             model=target_model,
             shadow_models=shadow_models,
+            dataset=dataset,
+            shadow_col=data_split.get("shadow_col", None),
+            target_split_orig=target_split_orig,
             args=args,
             device=DEVICE,
         )
-
         target_groups = {
             "unlearn": target_loaders["unlearn"],
             "retain": target_loaders["retain"],
@@ -164,6 +169,8 @@ def main():
         print(f"IRIS_binary_directional run finished in {end_time - start_time:.4f} seconds")
 
         eval_results = evaluate_iris_binary_summary(summary)
+        if hasattr(iris_attack, "attack_head_meta"):
+            eval_results["attack_head_meta"] = iris_attack.attack_head_meta
 
         forget_class = getattr(unlearn_args, "forget_class", None)
         unlearn_method = getattr(unlearn_args, "unlearn", "GradAscent")
@@ -195,7 +202,8 @@ def main():
         report_text += f"selected_score_orientation = {eval_results['selected_score_orientation']}\n"
         report_text += f"num_unlearn = {eval_results['num_unlearn']}\n"
         report_text += f"num_nonunlearn = {eval_results['num_nonunlearn']}\n"
-
+        report_text += f"auc_logreg_oof = {eval_results.get('auc_logreg_oof', 'NA')}\n"
+        report_text += f"score_source = {eval_results.get('score_source', 'NA')}\n"
         if "score_stats" in eval_results:
             report_text += "\nScore stats:\n"
             for outer_k, outer_v in eval_results["score_stats"].items():
@@ -209,6 +217,18 @@ def main():
         report_text += f"score_lengths = {sanity_results['score_lengths']['passed']}\n"
         if sanity_results["output_files"] is not None:
             report_text += f"output_files = {sanity_results['output_files']['passed']}\n"
+        report_text += f"auc_legacy_score = {eval_results.get('auc_legacy_score', 'NA')}\n"
+        report_text += f"score_source = {eval_results.get('score_source', 'NA')}\n"
+
+        if "attack_head_meta" in eval_results:
+            report_text += "attack_head_meta =\n"
+            for k, v in eval_results["attack_head_meta"].items():
+                if k == "top_feature_importances":
+                    report_text += "  top_feature_importances =\n"
+                    for name, val in v[:10]:
+                        report_text += f"    {name}: {val}\n"
+                else:
+                    report_text += f"  {k}: {v}\n"
 
         save_text(report_text, paths["report_path"])
 
@@ -241,7 +261,21 @@ def main():
         print(f"AUC unlearn vs non-unlearn: {eval_results['auc_unlearn_vs_nonunlearn']}")
         print(f"AUC raw score: {eval_results['auc_raw_score']}")
         print(f"AUC negated score: {eval_results['auc_negated_score']}")
+        if "auc_legacy_score" in eval_results:
+            print(f"AUC legacy score: {eval_results['auc_legacy_score']}")
         print(f"Selected score orientation: {eval_results['selected_score_orientation']}")
+        if "score_source" in eval_results:
+            print(f"Score source: {eval_results['score_source']}")
+
+        if "attack_head_meta" in eval_results:
+            print("Attack head meta:")
+            for k, v in eval_results["attack_head_meta"].items():
+                if k == "top_feature_importances":
+                    print("  top_feature_importances:")
+                    for name, val in v[:10]:
+                        print(f"    {name}: {val}")
+                else:
+                    print(f"  {k}: {v}")
         print("Query summary:")
         print(iris_attack.get_query_audit_summary())
         print("Sanity:")

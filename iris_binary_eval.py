@@ -30,7 +30,7 @@ def _collect_feature_keys(summary):
             for k, v in item.items():
                 if isinstance(v, (int, float, np.integer, np.floating)):
                     keys.add(k)
-    banned = {"target_label", "pred_clean", "binary_pred"}
+    banned = {"target_label", "pred_clean", "binary_pred", "iris_score", "legacy_score"}
     return sorted([k for k in keys if k not in banned])
 
 
@@ -131,54 +131,38 @@ def _evaluate_one_orientation(scores, y_true, group_names, orientation_name):
 
 
 def evaluate_iris_binary_summary(summary):
-    """
-    Binary task:
-        positive class = unlearn
-        negative class = retain + test
-
-    Important improvements:
-    - checks BOTH score polarities: score and -score
-    - chooses the better orientation
-    - returns group-wise feature diagnostics
-    """
-
-    raw_scores = []
+    scores = []
+    legacy_scores = []
     y_true = []
     group_names = []
     sample_ids = []
+    score_source = None
 
-    for sid, item in summary["unlearn"].items():
-        raw_scores.append(float(item["iris_score"]))
-        y_true.append(1)
-        group_names.append("unlearn")
-        sample_ids.append(int(sid))
+    for group, label in [("unlearn", 1), ("retain", 0), ("test", 0)]:
+        for sid, item in summary[group].items():
+            scores.append(float(item["iris_score"]))
+            legacy_scores.append(float(item.get("legacy_score", 0.0)))
+            y_true.append(label)
+            group_names.append(group)
+            sample_ids.append(int(sid))
+            if score_source is None:
+                score_source = item.get("score_source", "unknown")
 
-    for sid, item in summary["retain"].items():
-        raw_scores.append(float(item["iris_score"]))
-        y_true.append(0)
-        group_names.append("retain")
-        sample_ids.append(int(sid))
-
-    for sid, item in summary["test"].items():
-        raw_scores.append(float(item["iris_score"]))
-        y_true.append(0)
-        group_names.append("test")
-        sample_ids.append(int(sid))
-
-    raw_scores = np.array(raw_scores, dtype=float)
+    scores = np.array(scores, dtype=float)
+    legacy_scores = np.array(legacy_scores, dtype=float)
     y_true = np.array(y_true, dtype=int)
     group_names = np.array(group_names)
     sample_ids = np.array(sample_ids, dtype=int)
 
     eval_raw = _evaluate_one_orientation(
-        scores=raw_scores,
+        scores=scores,
         y_true=y_true,
         group_names=group_names,
         orientation_name="raw_score_means_more_unlearn",
     )
 
     eval_neg = _evaluate_one_orientation(
-        scores=-raw_scores,
+        scores=-scores,
         y_true=y_true,
         group_names=group_names,
         orientation_name="negated_score_means_more_unlearn",
@@ -187,58 +171,40 @@ def evaluate_iris_binary_summary(summary):
     if eval_raw["best_metrics"]["best_balanced_acc"] > eval_neg["best_metrics"]["best_balanced_acc"] + 1e-12:
         selected = eval_raw
         selected_name = "raw_score_means_more_unlearn"
-        selected_scores = raw_scores
+        selected_scores = scores
     elif eval_neg["best_metrics"]["best_balanced_acc"] > eval_raw["best_metrics"]["best_balanced_acc"] + 1e-12:
         selected = eval_neg
         selected_name = "negated_score_means_more_unlearn"
-        selected_scores = -raw_scores
+        selected_scores = -scores
     else:
         if eval_raw["auc"] >= eval_neg["auc"]:
             selected = eval_raw
             selected_name = "raw_score_means_more_unlearn"
-            selected_scores = raw_scores
+            selected_scores = scores
         else:
             selected = eval_neg
             selected_name = "negated_score_means_more_unlearn"
-            selected_scores = -raw_scores
+            selected_scores = -scores
 
     feature_keys = _collect_feature_keys(summary)
     feature_stats = _group_feature_stats(summary, feature_keys)
-
-    score_stats = {
-        "raw_score": {
-            "unlearn_mean": _safe_mean([float(item["iris_score"]) for _, item in summary["unlearn"].items()]),
-            "retain_mean": _safe_mean([float(item["iris_score"]) for _, item in summary["retain"].items()]),
-            "test_mean": _safe_mean([float(item["iris_score"]) for _, item in summary["test"].items()]),
-            "all_mean": float(np.mean(raw_scores)) if len(raw_scores) > 0 else 0.0,
-            "all_std": float(np.std(raw_scores)) if len(raw_scores) > 0 else 0.0,
-            "min": float(np.min(raw_scores)) if len(raw_scores) > 0 else 0.0,
-            "max": float(np.max(raw_scores)) if len(raw_scores) > 0 else 0.0,
-        },
-        "selected_orientation_score": {
-            "orientation": selected_name,
-            "auc": float(selected["auc"]),
-            "all_mean": float(np.mean(selected_scores)) if len(selected_scores) > 0 else 0.0,
-            "all_std": float(np.std(selected_scores)) if len(selected_scores) > 0 else 0.0,
-            "min": float(np.min(selected_scores)) if len(selected_scores) > 0 else 0.0,
-            "max": float(np.max(selected_scores)) if len(selected_scores) > 0 else 0.0,
-        },
-    }
 
     return {
         "auc_unlearn_vs_nonunlearn": float(selected["auc"]),
         "auc_raw_score": float(eval_raw["auc"]),
         "auc_negated_score": float(eval_neg["auc"]),
+        "auc_legacy_score": _safe_auc(y_true, legacy_scores),
         "selected_score_orientation": selected_name,
+        "score_source": score_source,
         "best_metrics": selected["best_metrics"],
         "num_unlearn": int(np.sum(y_true == 1)),
         "num_nonunlearn": int(np.sum(y_true == 0)),
-        "raw_scores": raw_scores.tolist(),
         "selected_scores": selected_scores.tolist(),
+        "raw_scores": scores.tolist(),
+        "legacy_scores": legacy_scores.tolist(),
         "y_true": y_true.tolist(),
         "group_names": group_names.tolist(),
         "sample_ids": sample_ids.tolist(),
-        "score_stats": score_stats,
         "feature_keys": feature_keys,
         "feature_stats_by_group": feature_stats,
     }
