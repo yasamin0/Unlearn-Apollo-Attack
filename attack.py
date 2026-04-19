@@ -92,6 +92,7 @@ def main():
     parser.add_argument('--iris_shadow_train_neg_per_model', type=int, default=60)
     parser.add_argument('--iris_attack_head_seed', type=int, default=42)
     parser.add_argument('--seed',           type=int,   default=42,         help='random seed (default: 42)')
+    parser.add_argument('--iris_probe_num_shadow', type=int, default=4)
     args = parser.parse_args()
 
 

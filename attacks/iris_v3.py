@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.func import functional_call
 
 from .Apollo import Apollo_Offline
 
@@ -36,48 +37,80 @@ class IRIS_V3(Apollo_Offline):
         self.iris_use_relative_score = bool(getattr(args, "iris_use_relative_score", True))
         self.iris_use_early_features = bool(getattr(args, "iris_use_early_features", True))
         self.iris_early_k = int(getattr(args, "iris_early_k", 5))
+    
+    def _shadow_outputs(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Batched shadow forward pass.
+        Output shape: [num_shadow, batch, num_classes]
+        """
+        outputs = torch.vmap(
+            lambda ps, bs, xx: functional_call(
+                self.temp, ps, (xx,), {}, tie_weights=True, strict=False
+            ),
+            in_dims=(0, 0, None)
+        )(self.params, self.buffers, x)
+        return outputs
 
-    def _shadow_logits_mean(self, x: torch.Tensor) -> torch.Tensor:
+    def _compute_mode_loss_and_shadow_logit(self, x: torch.Tensor, target_label: torch.Tensor, mode: str):
         """
-        Mean shadow logits over all shadow models.
-        Shape: [1, num_classes]
+        Single batched shadow pass that gives:
+        - Apollo-style loss for optimization
+        - mean shadow logit on the true class for relative scoring
         """
-        logits = []
-        with torch.no_grad():
-            for m in self.shadow_models:
-                self._qa_shadow(1)
-                out = m(x)
-                logits.append(out)
-        return torch.mean(torch.stack(logits, dim=0), dim=0)
+        outputs = self._shadow_outputs(x)  # [num_shadow, batch, num_classes]
 
-    def _target_shadow_margin_gap(self, x: torch.Tensor, target_label: torch.Tensor) -> float:
+        flat = outputs.reshape(-1, outputs.size(-1))
+        label_rep = target_label.repeat(outputs.size(0))
+
+        loss_rt = F.cross_entropy(flat, label_rep)
+        top2_vals, _ = outputs.topk(2, dim=-1)
+        loss_db = top2_vals[0, :, 0] - top2_vals[0, :, 1]
+
+        if mode == "under":
+            loss = self.args.w[0] * loss_db - self.args.w[1] * loss_rt
+        elif mode == "over":
+            loss = self.args.w[0] * loss_db + self.args.w[1] * loss_rt
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        cls = target_label.item()
+        mean_shadow_logit = outputs[:, 0, cls].mean()
+
+        return loss, mean_shadow_logit
+
+    def _cheap_probe_score(self, x: torch.Tensor, target_label: torch.Tensor) -> float:
         """
-        Relative score:
-        target logit on true class - mean shadow logit on true class
+        Cheap shared probe score:
+        target true-class logit minus mean shadow true-class logit.
+        Uses one target forward + one batched shadow forward.
         """
         with torch.no_grad():
             self._qa_target(1)
             t_out = self.target_model(x)
-            s_out = self._shadow_logits_mean(x)
-            cls = target_label.item()
-            gap = t_out[0, cls].item() - s_out[0, cls].item()
-        return float(gap)
 
-    def _radius_probe(self, target_input: torch.Tensor, target_label: torch.Tensor, loss_func):
-        """
-        Sample a few random local directions and choose the most promising start point.
-        """
-        best_x = target_input.detach().clone()
-        best_loss = None
-        best_probe_score = None
-
-        with torch.no_grad():
-            # include original point as candidate
             shadow_count = len(self.shadow_models)
             self._qa_shadow(shadow_count)
-            base_loss = loss_func(best_x, target_label).item()
-            best_loss = base_loss
-            best_probe_score = 0.0
+            s_outputs = self._shadow_outputs(x)
+
+            cls = target_label.item()
+            t_logit = t_out[0, cls].item()
+            s_logit = s_outputs[:, 0, cls].mean().item()
+
+        return float(t_logit - s_logit)  
+
+    def _radius_probe(self, target_input: torch.Tensor, target_label: torch.Tensor):
+        """
+        Shared cheap probe:
+        sample a few random local directions and choose the best start point
+        using a cheap relative target-vs-shadow score.
+        """
+        best_x = target_input.detach().clone()
+        best_score = None
+        base_score = None
+
+        with torch.no_grad():
+            base_score = self._cheap_probe_score(best_x, target_label)
+            best_score = base_score
 
             for _ in range(self.iris_probe_samples):
                 noise = torch.randn_like(target_input)
@@ -86,15 +119,14 @@ class IRIS_V3(Apollo_Offline):
 
                 candidate = target_input + self.iris_probe_radius * direction
                 candidate = torch.clamp(candidate, 0.0, 1.0)
-                shadow_count = len(self.shadow_models)
-                self._qa_shadow(shadow_count)
-                cand_loss = loss_func(candidate, target_label).item()
-                if cand_loss > best_loss:
-                    best_loss = cand_loss
-                    best_x = candidate.detach().clone()
-                    best_probe_score = cand_loss - base_loss
 
-        return best_x, float(best_probe_score if best_probe_score is not None else 0.0)
+                cand_score = self._cheap_probe_score(candidate, target_label)
+
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_x = candidate.detach().clone()
+
+        return best_x, float(best_score - base_score)
 
     def _early_features(self, traj):
         """
@@ -118,15 +150,15 @@ class IRIS_V3(Apollo_Offline):
             "full_max": float(np.max(traj)),
         }
 
-    def IRIS_Adv(self, target_input: torch.Tensor, target_label: torch.Tensor, loss_func, mode: str):
+    def IRIS_Adv(self, target_input: torch.Tensor, target_label: torch.Tensor, mode: str, init_x: torch.Tensor = None, probe_gain: float = 0.0):
         """
-        Modified Apollo search:
-        1) radius-guided initialization
-        2) adversarial optimization
-        3) store relative and early-trajectory signals
+        Modified Apollo search with:
+        1) shared radius-guided initialization
+        2) single batched shadow forward per epoch
+        3) no duplicate target-shadow gap queries
         """
-        # 1) radius-guided init
-        init_x, probe_gain = self._radius_probe(target_input, target_label, loss_func)
+        if init_x is None:
+            init_x, probe_gain = self._radius_probe(target_input, target_label)
 
         adv_input = init_x.detach().clone().to(DEVICE)
         adv_input.requires_grad = True
@@ -140,10 +172,13 @@ class IRIS_V3(Apollo_Offline):
             optimizer.zero_grad()
 
             self._qa_steps(1)
+
             shadow_count = len(self.shadow_models)
             self._qa_shadow(shadow_count)
+            loss, mean_shadow_logit = self._compute_mode_loss_and_shadow_logit(
+                adv_input, target_label, mode=mode
+            )
 
-            loss = loss_func(adv_input, target_label)
             loss.backward()
             optimizer.step()
 
@@ -159,24 +194,16 @@ class IRIS_V3(Apollo_Offline):
                 target_pred = target_output.max(1)[1].item()
                 pred.append(target_pred)
 
-                # Apollo-like confidence track, but keep it relative-aware if desired
-                shadow_conf = 0.0
-                for m in self.shadow_models:
-                    self._qa_shadow(1)
-                    shadow_output = m(adv_input)
-                    shadow_logit = shadow_output[0, target_label.item()].item()
-                    shadow_conf += shadow_logit
-                shadow_conf /= max(len(self.shadow_models), 1)
-
                 target_logit = target_output[0, target_label.item()].item()
+                current_rel_gap = float(target_logit - mean_shadow_logit.item())
 
                 if self.iris_use_relative_score:
-                    current_conf = float(target_logit - shadow_conf)
+                    current_conf = current_rel_gap
                 else:
                     current_conf = float(target_logit)
 
                 conf.append(current_conf)
-                rel_score.append(self._target_shadow_margin_gap(adv_input, target_label))
+                rel_score.append(current_rel_gap)
 
         early = self._early_features(conf if self.iris_use_relative_score else rel_score)
 
@@ -197,8 +224,23 @@ class IRIS_V3(Apollo_Offline):
 
         self._qa_start(name, idx)
 
-        under = self.IRIS_Adv(target_input, target_label, self.batched_loss_Under, mode="under")
-        over = self.IRIS_Adv(target_input, target_label, self.batched_loss_Over, mode="over")
+        shared_init_x, shared_probe_gain = self._radius_probe(target_input, target_label)
+
+        under = self.IRIS_Adv(
+            target_input=target_input,
+            target_label=target_label,
+            mode="under",
+            init_x=shared_init_x,
+            probe_gain=shared_probe_gain,
+        )
+
+        over = self.IRIS_Adv(
+            target_input=target_input,
+            target_label=target_label,
+            mode="over",
+            init_x=shared_init_x,
+            probe_gain=shared_probe_gain,
+        )
 
         self.summary[name][idx] = {
             "target_input": target_input,
