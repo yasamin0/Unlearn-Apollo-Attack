@@ -1,3 +1,4 @@
+from html import parser
 import os
 import argparse
 import time
@@ -76,6 +77,8 @@ def main():
     parser.add_argument('--iris_use_relative_score', action='store_true')
     parser.add_argument('--iris_use_early_features', action='store_true')
     parser.add_argument('--iris_early_k', type=int, default=5)
+    parser.add_argument('--iris_min_epochs', type=int, default=10)
+    parser.add_argument('--iris_patience', type=int, default=4)
     parser.add_argument('--save_to',        type=str,   required=True,      help='save results to this path')
     parser.add_argument('--iris_num_directions', type=int, default=8)
     parser.add_argument('--iris_radius_min', type=float, default=0.02)

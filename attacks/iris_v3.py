@@ -37,6 +37,8 @@ class IRIS_V3(Apollo_Offline):
         self.iris_use_relative_score = bool(getattr(args, "iris_use_relative_score", True))
         self.iris_use_early_features = bool(getattr(args, "iris_use_early_features", True))
         self.iris_early_k = int(getattr(args, "iris_early_k", 5))
+        self.iris_min_epochs = int(getattr(args, "iris_min_epochs", 10))
+        self.iris_patience = int(getattr(args, "iris_patience", 4))
     
     def _shadow_outputs(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -149,6 +151,23 @@ class IRIS_V3(Apollo_Offline):
             "early_gain": float(early[-1] - early[0]) if len(early) >= 2 else 0.0,
             "full_max": float(np.max(traj)),
         }
+    def _epoch_monitor_score(self, conf_value: float, pred_value: int, true_label: int, mode: str) -> float:
+        """
+        Score used only for early stopping.
+        Higher is better.
+        """
+        score = float(conf_value)
+
+        if mode == "under":
+            # under branch prefers correct prediction with strong confidence
+            if pred_value == true_label:
+                score += 1.0
+        elif mode == "over":
+            # over branch prefers label instability / misclassification signal
+            if pred_value != true_label:
+                score += 1.0
+
+        return float(score)
 
     def IRIS_Adv(self, target_input: torch.Tensor, target_label: torch.Tensor, mode: str, init_x: torch.Tensor = None, probe_gain: float = 0.0):
         """
@@ -156,6 +175,7 @@ class IRIS_V3(Apollo_Offline):
         1) shared radius-guided initialization
         2) single batched shadow forward per epoch
         3) no duplicate target-shadow gap queries
+        4) adaptive early stopping
         """
         if init_x is None:
             init_x, probe_gain = self._radius_probe(target_input, target_label)
@@ -167,6 +187,9 @@ class IRIS_V3(Apollo_Offline):
         conf = []
         pred = []
         rel_score = []
+
+        best_monitor = -float("inf")
+        epochs_without_improve = 0
 
         for epoch in range(self.args.atk_epochs):
             optimizer.zero_grad()
@@ -205,6 +228,23 @@ class IRIS_V3(Apollo_Offline):
                 conf.append(current_conf)
                 rel_score.append(current_rel_gap)
 
+                # -------- early stopping monitor --------
+                monitor = self._epoch_monitor_score(
+                    conf_value=current_conf,
+                    pred_value=target_pred,
+                    true_label=target_label.item(),
+                    mode=mode,
+                )
+
+                if monitor > best_monitor + 1e-12:
+                    best_monitor = monitor
+                    epochs_without_improve = 0
+                else:
+                    epochs_without_improve += 1
+
+                if (epoch + 1) >= self.iris_min_epochs and epochs_without_improve >= self.iris_patience:
+                    break
+
         early = self._early_features(conf if self.iris_use_relative_score else rel_score)
 
         return {
@@ -216,6 +256,7 @@ class IRIS_V3(Apollo_Offline):
             "early_gain": float(early["early_gain"]),
             "full_max": float(early["full_max"]),
             "mode": mode,
+            "epochs_used": int(len(conf)),
         }
 
     def update_atk_summary(self, name, target_input, target_label, idx):
@@ -251,7 +292,6 @@ class IRIS_V3(Apollo_Offline):
             "ov_conf": over["conf"],
             "ov_pred": over["pred"],
 
-            # New IRIS_v3 features
             "un_probe_gain": under["probe_gain"],
             "ov_probe_gain": over["probe_gain"],
 
@@ -266,8 +306,10 @@ class IRIS_V3(Apollo_Offline):
 
             "un_full_max": under["full_max"],
             "ov_full_max": over["full_max"],
-        }
 
+            "un_epochs_used": under["epochs_used"],
+            "ov_epochs_used": over["epochs_used"],
+        }
         self._qa_end()
         return None
 
@@ -329,7 +371,31 @@ class IRIS_V3(Apollo_Offline):
                         under_scores = []
                         over_scores = []
 
-                        for epoch in range(len(under_conf[name][i])):
+                        under_len = len(under_conf[name][i])
+                        over_len = len(over_conf[name][i])
+                        under_pred_len = len(under_pred[name][i])
+                        over_pred_len = len(over_pred[name][i])
+
+                        common_epochs = min(under_len, over_len, under_pred_len, over_pred_len)
+
+                        if common_epochs == 0:
+                            if name == "retain":
+                                predicted_class = "retain"
+                                classifications["retain"] += 1
+                            elif name == "test":
+                                predicted_class = "test"
+                                classifications["test"] += 1
+                            else:
+                                predicted_class = "unlearn"
+                                classifications["unlearn"] += 1
+
+                            if predicted_class == name:
+                                correct_classifications[name] += 1
+
+                            total_samples += 1
+                            continue
+
+                        for epoch in range(common_epochs):
                             under_score = under_conf[name][i][epoch] - under_th
                             over_score = over_th - over_conf[name][i][epoch]
 
